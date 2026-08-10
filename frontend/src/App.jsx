@@ -32,7 +32,7 @@ import {
 import KnowledgeGraph from './KnowledgeGraph';
 import GlobalGraphView from './GlobalGraphView';
 
-const API_BASE = '/api';
+const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
 axios.interceptors.request.use(async (config) => {
   const { data: { session } } = await supabase.auth.getSession();
