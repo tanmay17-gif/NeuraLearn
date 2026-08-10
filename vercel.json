@@ -1,17 +1,14 @@
 {
-  "builds": [
-    {
-      "src": "frontend/package.json",
-      "use": "@vercel/static-build",
-      "config": {
-        "distDir": "dist"
-      }
+  "services": {
+    "frontend": {
+      "root": "frontend",
+      "framework": "vite"
     },
-    {
-      "src": "backend/main.py",
-      "use": "@vercel/python"
+    "backend": {
+      "root": "backend",
+      "framework": "fastapi"
     }
-  ],
+  },
   "routes": [
     {
       "src": "/api/(.*)",
@@ -19,7 +16,7 @@
     },
     {
       "src": "/(.*)",
-      "dest": "/frontend/$1"
+      "dest": "/frontend/dist/$1"
     }
   ]
 }
