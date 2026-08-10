@@ -2,7 +2,8 @@ import React, { useState, useEffect, useMemo, useRef } from 'react';
 import axios from 'axios';
 import ForceGraph2D from 'react-force-graph-2d';
 
-const API_BASE = import.meta.env.VITE_API_URL || '/api';
+const _apiRoot = import.meta.env.VITE_API_URL;
+const API_BASE = _apiRoot ? `${_apiRoot.replace(/\/api$/, '')}/api` : '/api';
 
 export default function GlobalGraphView({ onBack }) {
   const [graphData, setGraphData] = useState({ nodes: [], edges: [] });

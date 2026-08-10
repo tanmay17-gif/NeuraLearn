@@ -32,7 +32,8 @@ import {
 import KnowledgeGraph from './KnowledgeGraph';
 import GlobalGraphView from './GlobalGraphView';
 
-const API_BASE = import.meta.env.VITE_API_URL || '/api';
+const _apiRoot = import.meta.env.VITE_API_URL;
+const API_BASE = _apiRoot ? `${_apiRoot.replace(/\/api$/, '')}/api` : '/api';
 
 axios.interceptors.request.use(async (config) => {
   const { data: { session } } = await supabase.auth.getSession();
