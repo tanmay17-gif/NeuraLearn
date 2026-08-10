@@ -1,0 +1,19 @@
+{
+  "preferences": {
+    "beginner": {
+      "up": 0,
+      "down": 0
+    },
+    "intermediate": {
+      "up": 0,
+      "down": 2
+    },
+    "expert": {
+      "up": 0,
+      "down": 0
+    }
+  },
+  "instructions": [
+    "User was not satisfied with previous intermediate outputs. Increase content richness, provide deeper technical synthesis, and ensure research-grade depth."
+  ]
+}
