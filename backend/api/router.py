@@ -164,8 +164,12 @@ async def process_video(request: VideoRequest, user_id: str = Depends(get_curren
         await set_cached_synthesis(cache_key, response_data)
         return ProcessingResponse(**response_data)
 
-    except Exception:
-        raise HTTPException(status_code=500, detail="Failed to process video.")
+    except Exception as e:
+        err = str(e)
+        if "blocking" in err.lower() or "bot" in err.lower() or "429" in err:
+            raise HTTPException(status_code=503, detail="YouTube is blocking automated requests from this server. Please paste the video transcript manually using the 'Manual Transcript' option.")
+        raise HTTPException(status_code=500, detail=f"Failed to process video: {err[:200]}")
+
 
 @api_router.post("/generate/{module}")
 async def generate_module(
