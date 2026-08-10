@@ -9,5 +9,4 @@ yt-dlp
 google-genai
 groq
 redis
-# opencv-python is large — only needed for local visual analysis
-# opencv-python
+opencv-python-headless
