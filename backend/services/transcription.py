@@ -2,8 +2,11 @@ import os
 import re
 import base64
 import tempfile
+import asyncio
 import requests
 import yt_dlp
+import google.genai as genai
+from google.genai import types as genai_types
 from youtube_transcript_api import YouTubeTranscriptApi
 from youtube_transcript_api._errors import (
     TranscriptsDisabled, 
@@ -134,11 +137,50 @@ async def get_transcript_yt_dlp(video_id: str, cookies_path: str = None) -> str:
         return None
 
 
+async def get_transcript_via_gemini(url: str) -> Optional[str]:
+    """
+    Ultimate fallback: use Gemini's native YouTube understanding.
+    Gemini 1.5 Flash can directly process YouTube URLs — no cookies needed.
+    Works for all users regardless of server IP blocking.
+    """
+    api_key = os.getenv("GOOGLE_API_KEY")
+    if not api_key:
+        return None
+    try:
+        print(f"[transcription] Trying Gemini native YouTube processing for {url}")
+        client = genai.Client(api_key=api_key)
+        
+        def _call():
+            return client.models.generate_content(
+                model="gemini-1.5-flash",
+                contents=[
+                    genai_types.Part(
+                        file_data=genai_types.FileData(file_uri=url)
+                    ),
+                    """Provide a complete, verbatim transcript of all spoken words in this video.
+                    Include everything that is said. Do not summarize. Do not skip any parts.
+                    Format as plain text without timestamps."""
+                ]
+            )
+        
+        loop = asyncio.get_event_loop()
+        response = await loop.run_in_executor(None, _call)
+        text = response.text.strip()
+        if text and len(text) > 100:
+            print(f"[transcription] Gemini YouTube fallback succeeded ({len(text)} chars)")
+            return text
+        return None
+    except Exception as e:
+        print(f"[transcription] Gemini YouTube fallback error: {e}")
+        return None
+
+
+
 async def get_transcript(url: str) -> Dict[str, Any]:
     """
     Fetches transcript using youtube-transcript-api (instance-based).
     Uses COOKIES_BASE64 env var (cloud) or local cookies.txt (dev), 
-    then falls back to yt-dlp.
+    then falls back to yt-dlp, then falls back to Gemini native processing.
     """
     video_id = _extract_video_id(url)
     cookies_path = _get_cookies_path()
@@ -190,12 +232,25 @@ async def get_transcript(url: str) -> Dict[str, Any]:
                 }
 
             err_lower = str(e).lower()
-            if "bot" in err_lower or "429" in err_lower or "blocking" in err_lower or isinstance(e, CouldNotRetrieveTranscript):
+            is_blocked = "bot" in err_lower or "429" in err_lower or "blocking" in err_lower or isinstance(e, CouldNotRetrieveTranscript)
+            
+            # 3. Ultimate fallback — Gemini native YouTube processing (works for all users!)
+            print(f"[transcription] Both primary methods failed, trying Gemini native fallback...")
+            gemini_text = await get_transcript_via_gemini(url)
+            if gemini_text:
+                return {
+                    "video_id": video_id,
+                    "title": f"Video {video_id} (Gemini)",
+                    "text": gemini_text
+                }
+            
+            if is_blocked:
                 raise Exception(
                     "YouTube is blocking automated requests from this server. "
-                    "Add your COOKIES_BASE64 to Render environment variables to fix this."
+                    "Please use the 'Manual Transcript' option or try again later."
                 )
             raise e
+
 
     except (TranscriptsDisabled, NoTranscriptFound):
         raise Exception("This video has no captions available. Try a different video.")
