@@ -18,6 +18,31 @@ class LightweightSupabase:
     def table(self, table_name: str, jwt: Optional[str] = None):
         return SupabaseTable(self, table_name, jwt=jwt)
 
+    def storage(self):
+        return SupabaseStorage(self)
+
+
+class SupabaseStorage:
+    def __init__(self, client):
+        self.client = client
+
+    def upload(self, bucket: str, file_path: str, destination_path: str, content_type: str = "image/jpeg"):
+        """Uploads a file to Supabase Storage."""
+        url = f"{self.client.url}/storage/v1/object/{bucket}/{destination_path}"
+        headers = {
+            "apikey": self.client.key,
+            "Authorization": f"Bearer {self.client.key}",
+            "Content-Type": content_type
+        }
+        
+        with open(file_path, "rb") as f:
+            data = f.read()
+            
+        with httpx.Client(timeout=15) as client:
+            response = client.post(url, headers=headers, content=data)
+            response.raise_for_status()
+            
+        return f"{self.client.url}/storage/v1/object/public/{bucket}/{destination_path}"
 
 class SupabaseTable:
     def __init__(self, client, table_name, jwt=None):

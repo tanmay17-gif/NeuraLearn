@@ -1,0 +1,202 @@
+REQUIREMENTS SPECIFICATION
+Stateful User Profiling Module for Personalized Video Summarization
+Prepared by: Meenakshi Amit Paul  |  Research Scholar, Faculty of Computer Science, Pacific Academy of Higher Education and Research University, Udaipur
+1. Purpose of This Document
+This document specifies the exact requirements for a software module I need built as part of my doctoral research. It defines what the module must do, what it must not do, how it will be tested, and what must be delivered. Please read Section 8 (Scope Boundaries) carefully — it is as important as the requirements themselves.
+Please do not add features beyond what is listed here. Additional functionality makes the module harder to document and defend academically.
+2. Background and Context
+This module is one component of a larger doctoral research project on personalized video summarization. The research problem is that existing video summarization systems produce the same generic summary for every user, and do not remember a user's preferences between sessions.
+The module specified here solves the memory part of that problem. It stores what a user prefers, updates those preferences based on feedback, and converts the stored preferences into a natural-language instruction (a “prompt prefix”) that will later be used to guide an AI model.
+Important: this module does NOT call any AI model itself. It only prepares the instruction text. A separate component (not part of this work) will consume that text.
+3. Technology Requirements
+Item
+Requirement
+Notes
+Language
+Python 3.10 or higher
+Mandatory
+Database
+SQLite
+Single local file; no server setup
+Dependencies
+Standard library preferred
+Minimise third-party packages
+Interface
+Python functions / module
+No web UI required
+AI/LLM libraries
+None
+Must not be used in this module
+Code style
+Commented, readable
+Code will be described in a thesis
+4. Functional Requirements
+FR-1: Profile Schema
+The module must implement a user profile with exactly the following fields:
+Field
+Type
+Allowed Values
+Default
+user_id
+string
+unique identifier
+(required)
+persona
+string
+student / professional / researcher / generic
+generic
+summary_length
+string
+short / medium / detailed
+medium
+detail_level
+integer
+1 to 5
+3
+style
+string
+bullets / narrative
+bullets
+topics_of_interest
+list of strings
+free text
+empty list
+learned_behaviors
+JSON / dict
+derived from feedback
+empty
+feedback_count
+integer
+0 or more
+0
+profile_version
+integer
+1 or more
+1
+last_updated
+timestamp
+ISO 8601
+creation time
+FR-2: Core Storage Functions
+The module must expose these four functions:
+create_profile(user_id)  ->  creates new profile with defaults
+get_profile(user_id)  ->  returns complete profile as a dict
+update_profile(user_id, changes)  ->  updates fields, increments version
+get_profile_history(user_id)  ->  returns list of past profile states
+Every call to update_profile must increment profile_version by 1, update last_updated, and write a snapshot to the history table.
+FR-3: Persistence Across Sessions
+Profiles must survive program restart. If a profile is created, the program is closed completely, and then reopened, the profile must be retrievable with identical values.
+FR-4: Multiple Independent Users
+The module must support multiple users simultaneously. Two users must be able to hold entirely different preference values with no interference between them.
+FR-5: Profile Change History
+A separate history table must record every change with the following fields:
+history_id, user_id, profile_snapshot (JSON), trigger_event, timestamp
+This is a mandatory requirement, not optional. The history is required as research evidence showing that preferences evolved over time.
+FR-6: Feedback-Driven Update Mechanism
+The module must implement a function:
+apply_feedback(user_id, rating, comment)  ->  updates profile per rules below
+The update rules must be implemented exactly as specified in this table, and must be written as an explicit, readable rules structure (for example a dictionary or config block) rather than being scattered through conditional statements:
+Trigger
+Condition
+Profile Change
+Negative rating
+comment contains “too long”
+detail_level − 1 (min 1); summary_length → short
+Negative rating
+comment contains “too short” / “too shallow”
+detail_level + 1 (max 5); summary_length → detailed
+Negative rating
+comment contains “too technical”
+detail_level − 1 (min 1)
+Positive rating
+any
+record current settings in learned_behaviors as reinforced
+Any feedback
+always
+feedback_count + 1; profile_version + 1; write history snapshot
+Rules must be easy to modify without changing program logic, since the rule set will be revised during research.
+FR-7: Prompt Builder Function
+The module must expose:
+build_prompt(user_id)  ->  returns a natural-language instruction string
+This function reads the CURRENT profile and converts it into readable English instruction text. Example mappings:
+summary_length = short + style = bullets  →  “Produce a concise, bullet-point summary.”
+detail_level = 2  →  “Keep explanations brief and avoid extended background.”
+topics_of_interest = [AI, finance]  →  “Prioritise content relating to AI and finance.”
+learned_behaviors indicates prior “too long” feedback  →  “This user has previously found summaries too long; keep output brief.”
+The output must be plain readable English, not a data dump of field values. Different profiles must produce visibly different instruction text.
+FR-8: Prompt Logging
+Every call to build_prompt must be logged to a table with these fields:
+log_id, user_id, profile_version_used, generated_prompt_text, timestamp
+5. Acceptance Tests
+The module will be considered complete only when all of the following tests pass. Please run these and share the results.
+#
+Test
+Expected Result
+T1
+Create profile, close program, reopen, retrieve
+Profile returned with identical values
+T2
+Create two users with different preferences
+Both retrievable independently, no interference
+T3
+Call update_profile once
+profile_version increases by 1; history gains one row
+T4
+Build prompt for three different profiles
+Three visibly different instruction strings
+T5
+Apply negative feedback “too long” three times
+detail_level decreases; summary_length becomes short
+T6
+Build prompt before and after T5 for same user
+The two prompt strings differ, traceable to the feedback
+T7
+Retrieve profile history after several updates
+Full ordered list of past states with timestamps
+Test T6 is the single most important test. It demonstrates that the system is stateful — that stored feedback changes future behaviour. Please provide the two prompt strings side by side as output.
+6. Deliverables
+Working Python module implementing all functional requirements above.
+SQLite database schema (tables: profiles, profile_history, prompt_log).
+A demo script that runs all seven acceptance tests and prints results to screen.
+A short README explaining how to install and run the module.
+The rules structure from FR-6 in an easily editable location, clearly identified.
+Sample output from test T6 showing the before-and-after prompt strings.
+7. Documentation Requirements
+Because this module will be described in an academic thesis, please also provide:
+A brief written description of the database schema (tables, fields, relationships).
+A simple flow description: how feedback travels from input, through the update rules, into the stored profile, and then into the generated prompt.
+Inline code comments explaining the purpose of each function.
+Diagrams are welcome but not required — plain written description is sufficient.
+8. Scope Boundaries — What NOT to Build
+The following are explicitly out of scope. Please do not implement them, even if they seem helpful:
+Not required
+Reason
+Any call to an AI model or LLM API
+Handled by a separate component
+Video processing, transcripts, or subtitles
+Separate research objective
+Summary generation of any kind
+Separate research objective
+Web interface, frontend, or mobile app
+Not needed; functions are sufficient
+User authentication or login system
+user_id passed in directly is sufficient
+Cloud hosting or deployment
+Runs locally only
+Machine-learning-based preference prediction
+Rules must stay explicit and readable
+Quality metrics or evaluation scoring
+Separate research objective
+If something appears missing or ambiguous, please ask me before adding it rather than deciding independently.
+9. Notes for Whoever Builds This
+Simplicity is more valuable than sophistication here. The logic must remain explainable in a thesis and defensible in an oral examination.
+Avoid frameworks that hide the update logic (for example, prebuilt LLM “memory” modules). The update mechanism must be visibly my own design.
+Keep the rules in FR-6 separate from program logic so they can be revised without restructuring the code.
+Please note the versions of Python and any packages used, for reproducibility.
+10. Questions to Confirm Before Starting
+Please confirm your understanding of the following before beginning work:
+Do you understand that this module must NOT call any AI or LLM service?
+Do you understand that profile history (FR-5) is mandatory, not optional?
+Do you understand that test T6 (prompt changes after feedback) is the primary success criterion?
+Can you deliver all seven acceptance tests as a runnable demo script?
+What is your estimated timeline?

@@ -76,7 +76,7 @@ async def generate_summary_with_prompt(transcript: str, master_prompt: str) -> D
     try:
         completion = groq_client.chat.completions.create(
             messages=[{"role": "user", "content": prompt}],
-            model="llama-3.3-70b-versatile",
+            model="openai/gpt-oss-120b",
         )
         content = completion.choices[0].message.content
         
@@ -270,7 +270,7 @@ async def generate_notes(transcript: str, level: str = "intermediate", user_id: 
     try:
         completion = groq_client.chat.completions.create(
             messages=[{"role": "user", "content": prompt}],
-            model="llama-3.3-70b-versatile",
+            model="openai/gpt-oss-120b",
         )
         return completion.choices[0].message.content
     except Exception as e:
@@ -343,7 +343,7 @@ async def generate_visual_analysis(transcript: str, video_url: str, level: str =
             """
             completion = groq_client.chat.completions.create(
                 messages=[{"role": "user", "content": fallback_prompt}],
-                model="llama-3.3-70b-versatile",
+                model="openai/gpt-oss-120b",
             )
             return "Note: Visual synthesis generated from transcript analysis.\n\n" + completion.choices[0].message.content
         except Exception:
@@ -385,7 +385,7 @@ async def extract_knowledge_graph(transcript: str, user_id: str, video_id: str) 
     try:
         completion = groq_client.chat.completions.create(
             messages=[{"role": "user", "content": prompt}],
-            model="llama-3.3-70b-versatile",
+            model="openai/gpt-oss-120b",
             response_format={"type": "json_object"}
         )
         content = completion.choices[0].message.content
@@ -434,7 +434,7 @@ async def generate_flashcards(transcript: str, user_id: str = "default_user", vi
     try:
         completion = groq_client.chat.completions.create(
             messages=[{"role": "user", "content": prompt}],
-            model="llama-3.3-70b-versatile",
+            model="openai/gpt-oss-120b",
             response_format={"type": "json_object"}
         )
         data = json.loads(completion.choices[0].message.content)

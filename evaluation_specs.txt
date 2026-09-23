@@ -1,0 +1,312 @@
+--- DB Change Request ---
+DATABASE CHANGE REQUEST
+NeuraLearn — Schema Additions Required for Research Data Collection
+Requested by: Meenakshi Amit Paul  |  Research Scholar, Pacific Academy of Higher Education and Research University, Udaipur
+1. Purpose of This Request
+The existing system works as intended from a user's point of view. The changes requested here do not alter that behaviour. They add record-keeping so that the system's operation can be observed, measured, and reported as part of ongoing doctoral research.
+At present the database stores the current state of a user's preferences, but does not retain a record of how that state was reached, nor of the instructions that were generated from it. Without those records the system cannot be used as a source of research evidence, because there is no way to demonstrate after the fact that preferences changed, when they changed, or what effect the change had on generated output.
+All additions below are additive. No existing table, column, or behaviour needs to be modified or removed.
+2. Summary of Changes
+#
+Change
+Type
+Priority
+1
+generation_log
+New table
+High
+2
+profile_history
+New table
+High
+3
+profile_version, feedback_count, last_updated
+New columns on profile table
+High
+4
+created_at, profile_version_used, generation_log_id
+New columns on summaries table
+Medium
+5
+evaluation_response
+New table
+Low — required later
+6
+Row level security policies
+New policies
+High
+3. New Tables
+3.1  generation_log
+Records every summary generation performed by the system.
+CREATE TABLE IF NOT EXISTS generation_log (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    user_id UUID REFERENCES auth.users NOT NULL,
+    video_id TEXT NOT NULL,
+    use_profile BOOLEAN NOT NULL DEFAULT TRUE,
+    profile_version_used INTEGER,
+    prompt_text TEXT NOT NULL,
+    summary_output TEXT,
+    model_name TEXT,
+    latency_ms INTEGER,
+    cache_hit BOOLEAN DEFAULT FALSE,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+Why this is needed: 
+the instruction text sent to the model is currently discarded after generation. It is the central piece of evidence required, since the research claim is that the instruction changes as a user's preferences are revised. Without prompt_text retained, that claim cannot be substantiated. The model_name field is equally necessary: several models in use are preview releases subject to withdrawal, and results cannot be reproduced without knowing which version produced them.
+3.2  profile_history
+Records a snapshot of the user profile each time it is revised.
+CREATE TABLE IF NOT EXISTS profile_history (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    user_id UUID REFERENCES auth.users NOT NULL,
+    profile_snapshot JSONB NOT NULL,
+    profile_version INTEGER NOT NULL,
+    trigger_event TEXT,
+    free_text_note TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+Why this is needed: 
+the profile table holds only the present state. The sequence of states that produced it is overwritten and lost. This table preserves that sequence, allowing the evolution of a user model across successive interactions to be examined and reported.
+3.3  evaluation_response
+Stores responses from the planned comparative user study. Not required immediately, but included here so that the schema can be prepared in one pass.
+CREATE TABLE IF NOT EXISTS evaluation_response (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    participant_id TEXT NOT NULL,
+    video_id TEXT NOT NULL,
+    shown_as_A TEXT NOT NULL,
+    ratings_A JSONB,
+    ratings_B JSONB,
+    preference TEXT,
+    preference_reason TEXT,
+    profile_version_used INTEGER,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+Why this is needed: 
+the evaluation study presents two summaries without labels and records which the participant preferred. The shown_as_A field retains the mapping between the displayed labels and the underlying conditions so that responses can be decoded during analysis.
+4. Columns to Add to Existing Tables
+4.1  Profile table
+ALTER TABLE <profile_table_name>
+  ADD COLUMN IF NOT EXISTS profile_version INTEGER DEFAULT 1,
+  ADD COLUMN IF NOT EXISTS feedback_count INTEGER DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS last_updated TIMESTAMP WITH TIME ZONE DEFAULT NOW();
+Why this is needed: 
+profile_version is the mechanism by which a generated summary can be tied to the exact profile state that produced it. It should be incremented on every revision. Without it, statements about the profile having changed rest on assertion rather than record.
+4.2  Summaries table
+ALTER TABLE <summaries_table_name>
+  ADD COLUMN IF NOT EXISTS created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+  ADD COLUMN IF NOT EXISTS profile_version_used INTEGER,
+  ADD COLUMN IF NOT EXISTS generation_log_id UUID REFERENCES generation_log(id);
+Why this is needed: 
+stored summaries currently carry no timestamp, so their order relative to feedback events cannot be established. Since the argument rests on showing that later summaries reflect earlier feedback, the ordering must be recorded rather than inferred.
+5. Row Level Security
+Following the pattern used by the existing tables:
+ALTER TABLE profile_history ENABLE ROW LEVEL SECURITY;
+ALTER TABLE generation_log ENABLE ROW LEVEL SECURITY;
+ 
+CREATE POLICY "Users can view their own profile history"
+    ON profile_history FOR ALL USING (auth.uid() = user_id);
+ 
+CREATE POLICY "Users can view their own generation log"
+    ON generation_log FOR ALL USING (auth.uid() = user_id);
+6. Application Changes Accompanying the Schema
+Three changes in application code are needed for the new tables to be populated.
+On every generation, insert a row into generation_log containing the instruction text actually sent to the model, the model identifier, and the profile version consulted.
+On every profile revision, increment profile_version, update last_updated, and insert a snapshot row into profile_history recording what triggered the change.
+Add a backend parameter use_profile to the generation endpoint. When false, generation proceeds with a fixed generic instruction and the profile is not consulted. This is a backend parameter only and should not appear in the user interface.
+The generic instruction used when use_profile is false should be stored as a constant and left unchanged for the duration of the study, so that the comparison condition remains consistent across all participants.
+7. What Is Not Changing
+No existing table is modified or dropped.
+No existing column is renamed or removed.
+No change to what users see or how they interact with the system.
+No change to the summarization behaviour itself.
+The concepts, concept_edges, and video_concepts tables are unaffected.
+8. Sequence of Work
+Step
+Task
+Depends on
+1
+Create generation_log table and RLS policy
+—
+2
+Add profile_version, feedback_count, last_updated to profile table
+—
+3
+Create profile_history table and RLS policy
+Step 2
+4
+Write generation_log row on every generation
+Step 1
+5
+Write profile_history snapshot on every profile revision
+Steps 2, 3
+6
+Add created_at and related columns to summaries table
+Step 1
+7
+Add use_profile backend parameter
+Step 4
+8
+Create evaluation_response table
+Can be deferred
+Steps 1 to 5 are the priority. Once they are in place, a single test cycle will produce the records required.
+9. Verification
+The changes can be confirmed complete by carrying out the following sequence and checking the resulting records.
+Create a test account and set initial preferences. Note the profile_version.
+Submit a video and generate a summary. Confirm a generation_log row exists containing the full instruction text.
+Submit negative feedback. Confirm the profile values changed, profile_version incremented, and a profile_history row was written.
+Log out and log in again. Submit a different video.
+Compare the instruction text in the two generation_log rows. They should differ, and the difference should correspond to the feedback given.
+This verification sequence is itself the experiment. The records it produces are the data required for the research write-up, so it is worth carrying out carefully and preserving the results.
+--- Eval Module Req ---
+EVALUATION MODULE — REQUIREMENTS SPECIFICATION
+NeuraLearn — Comparative Study Interface for Research Evaluation
+Requested by: Meenakshi Amit Paul  |  Research Scholar, Pacific Academy of Higher Education and Research University, Udaipur
+1. What This Module Is For
+The existing system produces a summary that is shaped by each user's stored preferences. What has not yet been established is whether those personalized summaries are actually better, from the user's point of view, than ordinary summaries produced without any preference information.
+Answering that question requires showing the same person two summaries of the same video — one produced using their preferences and one produced without — and asking them to judge both, without knowing which is which. This module provides that facility.
+It is a research instrument, not a product feature. It runs on its own page, is used only by study participants during a defined period, and is not part of the normal user experience.
+2. How the Existing System Must Not Change
+The current behaviour stays exactly as it is. Users continue to receive a single personalized summary, give thumbs-up or thumbs-down feedback, and have their profile updated accordingly. Nothing about that flow is altered.
+The evaluation module sits alongside it, on a separate route, and reads from the same profile store without ever writing to it.
+This separation matters and must be preserved in the code. If ratings collected during the study were allowed to modify a participant's profile, the personalized summaries would drift during the study itself, and the comparison would no longer be measuring what it is supposed to measure. The evaluation path reads the profile; it must never write to it.
+3. Required Changes
+#
+Change
+Where
+1
+use_profile parameter on the generation endpoint
+Backend
+2
+Fixed generic instruction constant
+Backend
+3
+Evaluation page on a separate route
+Frontend
+4
+Side-by-side display with randomised order
+Frontend
+5
+Rating scales and preference question
+Frontend
+6
+evaluation_response table
+Database
+7
+Participant identifier handling
+Backend
+4. Backend Requirements
+4.1  The use_profile parameter
+The generation endpoint needs an additional boolean parameter controlling whether the user's profile is consulted.
+generate_summary(video_id, user_id, use_profile: bool)
+ 
+    if use_profile is True:
+        instruction = build_prompt(user_id)     # existing behaviour
+    else:
+        instruction = GENERIC_INSTRUCTION       # fixed constant
+ 
+    return call_model(instruction + transcript)
+Everything else about generation stays identical — same video, same transcript, same model, same settings. The only difference between the two conditions is whether the profile-derived instruction is included.
+4.2  The generic instruction
+When use_profile is false, generation uses a single fixed instruction stored as a constant, for example:
+GENERIC_INSTRUCTION = "Summarize this video."
+Two points about this constant. It must be the same for every participant, and it must not be changed at any point once the study has begun. It should also be genuinely neutral rather than a default profile, because the comparison is between having a profile and having none, not between two different profiles.
+4.3  Participant identifier
+Study responses are recorded against a participant number such as P001, not against a name or email address. The participant number is entered at the start of a session and used for all responses in that session.
+5. Frontend Requirements
+5.1  Separate route
+The evaluation interface lives on its own route, for example /evaluate. It must not be linked from the main application, and ordinary users should have no reason to encounter it.
+5.2  Session flow
+Participant enters their participant number.
+Participant answers a short set of preference questions. These are stored to the profile so the personalized condition has something to work from.
+For each of five videos: the system generates both summaries, displays them side by side, and collects ratings.
+After the fifth video, a short set of closing questions.
+5.3  Display requirements
+Both summaries appear on the same screen, side by side.
+They are labelled only as Summary A and Summary B.
+Which condition appears as A is decided at random, separately for each video.
+Nothing on the screen may indicate which summary came from which condition — no colours, no ordering cue, no wording such as “recommended”.
+Randomise per video rather than per participant. If the personalized summary were always shown as A, participants would begin to notice the pattern partway through the session and their later judgements would no longer be independent.
+5.4  Ratings collected for each summary
+Six statements, each rated on a five-point scale from strongly disagree to strongly agree:
+The summary covered the information I would want from this video.
+The summary would be useful to me in practice.
+The length of the summary was appropriate for my needs.
+The summary was clearly written and easy to follow.
+The way the summary was presented suited how I like to read.
+Overall, I am satisfied with this summary.
+5.5  Preference question
+After rating both summaries, the participant chooses one of: Summary A, Summary B, or no preference. An optional free-text box asks what made them choose.
+6. Database
+One new table records study responses.
+CREATE TABLE IF NOT EXISTS evaluation_response (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    participant_id TEXT NOT NULL,
+    video_id TEXT NOT NULL,
+    shown_as_A TEXT NOT NULL,        -- 'personalized' or 'generic'
+    ratings_A JSONB,
+    ratings_B JSONB,
+    preference TEXT,                  -- 'A' / 'B' / 'none'
+    preference_reason TEXT,
+    profile_version_used INTEGER,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+The shown_as_A field is essential. It records which condition was displayed in the A position, so that the responses can be decoded correctly during analysis. Without it the collected ratings cannot be attributed to the right condition and the entire dataset becomes unusable.
+Both generations must also be written to generation_log as normal, with use_profile set appropriately, so that the instruction text used in each condition is retained.
+7. Study Parameters
+Parameter
+Value
+Participants
+30 to 40
+Videos per participant
+5
+Videos
+The same five for every participant
+Expected paired comparisons
+150 to 200
+Session length
+Approximately 30 to 40 minutes
+Design
+Within-subjects — each participant sees both conditions
+8. Out of Scope
+The following should not be built as part of this module.
+Any change to the existing thumbs-up and thumbs-down feedback.
+Any writing to the profile from the evaluation path.
+Any display of which summary was personalized, at any point during a session.
+Analysis, charts, or statistics — responses are exported and analysed separately.
+Making the evaluation mode available to ordinary users.
+Allowing participants to choose which condition they see.
+9. Acceptance Tests
+#
+Test
+Expected result
+T1
+Call generation with use_profile true and false for the same video and user
+Two different instruction texts; both written to generation_log
+T2
+Inspect the generic instruction across several generations
+Identical every time, with no profile content
+T3
+Complete one video in the evaluation interface
+One evaluation_response row with both rating sets and the A/B mapping
+T4
+Run five videos in one session
+Position of the personalized condition varies across videos
+T5
+Compare the participant's profile before and after a full session
+Unchanged — no writes from the evaluation path
+T6
+Attempt to reach /evaluate from the main application
+Not reachable through normal navigation
+Test T5 is the one to be most careful about. If the profile changes during an evaluation session, something in the evaluation path is writing to it, and the collected data cannot be used.
+10. Deliverables
+Backend: use_profile parameter and the fixed generic instruction constant.
+Frontend: evaluation page on a separate route, with preference setup, five-video flow, ratings, and preference question.
+Database: evaluation_response table with row level security matching the existing pattern.
+A way to export the collected responses, for example as CSV.
+A short note confirming the six acceptance tests were run, with their results.
+11. Points to Confirm Before Starting
+Please confirm your understanding of the following.
+The evaluation path reads the profile but never writes to it.
+The A and B positions are randomised separately for each video, not once per participant.
+The generic condition uses no profile at all, rather than a default or neutral profile.
+The evaluation interface is on a separate route and not exposed to ordinary users.
+Your estimated timeline.

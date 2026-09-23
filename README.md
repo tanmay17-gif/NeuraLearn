@@ -34,6 +34,17 @@ Everything is personalized. You can set an "Identity Blueprint" — tell it you'
 
 ---
 
+## Research Evaluation Module
+
+This repository includes a dedicated blind A/B testing module designed for academic evaluation (Objective 2). 
+
+- **Data Logging (`generation_log`):** Every API request records the exact dynamically generated prompt and output summary, proving the system's personalization.
+- **Profile History (`profile_history`):** The system records immutable snapshots of the user's profile every time they give feedback and the system learns a new instruction.
+- **Evaluation UI (`/evaluate`):** A hidden route where study participants view 5 videos side-by-side (Generic vs Personalized), randomized to prevent positional bias.
+- **Secure Storage (`evaluation_response`):** Participant Likert ratings and preferences are securely logged in Supabase via JWT-authenticated RLS policies without contaminating the learning state of the system.
+
+---
+
 ## Tech Stack
 
 | Layer | Tech |
@@ -62,7 +73,7 @@ cd backend
 python -m venv .venv
 .\.venv\Scripts\activate
 pip install -r requirements.txt
-uvicorn main:app --reload
+uvicorn main:app --reload --port 8001
 ```
 
 Create a `backend/.env` file:

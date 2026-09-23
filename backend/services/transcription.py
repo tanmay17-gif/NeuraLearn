@@ -152,7 +152,7 @@ async def get_transcript_via_gemini(url: str) -> Optional[str]:
         
         def _call():
             return client.models.generate_content(
-                model="gemini-1.5-flash",
+                model="gemini-3.5-flash",
                 contents=[
                     genai_types.Part(
                         file_data=genai_types.FileData(file_uri=url)
@@ -258,3 +258,150 @@ async def get_transcript(url: str) -> Dict[str, Any]:
         if "YouTube is blocking" in str(e) or "COOKIES_BASE64" in str(e):
             raise e
         raise Exception(f"Could not get transcript: {str(e)[:200]}")
+
+
+import math
+import shutil
+import uuid
+import subprocess
+from groq import AsyncGroq
+# Isolated semaphore for audio (can reuse the vision one or make a new one, but they share Groq)
+from services.vision_client import vision_groq_semaphore
+# Semaphore for ffmpeg processes (reusing the one from frame_extraction)
+from services.frame_extraction import ffmpeg_semaphore
+
+async def check_local_subtitles(file_path: str) -> Optional[str]:
+    """Check if local video has embedded subtitles using ffprobe."""
+    try:
+        cmd = [
+            "ffprobe", "-v", "error", 
+            "-select_streams", "s", 
+            "-show_entries", "stream=index:tags=language", 
+            "-of", "csv=p=0", file_path
+        ]
+        process = await asyncio.create_subprocess_exec(
+            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        )
+        stdout, _ = await process.communicate()
+        if stdout.strip():
+            # Extract subtitles using ffmpeg if present
+            temp_sub = tempfile.mktemp(suffix=".srt")
+            extract_cmd = ["ffmpeg", "-y", "-i", file_path, "-map", "0:s:0", temp_sub]
+            ext_proc = await asyncio.create_subprocess_exec(
+                *extract_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+            )
+            await ext_proc.communicate()
+            if os.path.exists(temp_sub):
+                with open(temp_sub, "r", encoding="utf-8") as f:
+                    content = f.read()
+                os.remove(temp_sub)
+                import re
+                text = re.sub(r'<[^>]+>', '', content)
+                text = re.sub(r'\d{2}:\d{2}:\d{2},\d{3} --> \d{2}:\d{2}:\d{2},\d{3}', '', text)
+                text = re.sub(r'^\d+$', '', text, flags=re.MULTILINE)
+                return text.strip()
+    except Exception:
+        pass
+    return None
+
+async def extract_audio_chunk(input_path: str, output_path: str, start_sec: float, duration_sec: float):
+    cmd = [
+        "ffmpeg", "-y",
+        "-ss", str(start_sec),
+        "-t", str(duration_sec),
+        "-i", input_path,
+        "-vn", "-acodec", "libmp3lame", "-q:a", "2",
+        output_path
+    ]
+    process = await asyncio.create_subprocess_exec(
+        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+    )
+    stdout, stderr = await process.communicate()
+    if process.returncode != 0:
+        raise Exception(f"Failed to extract chunk: {stderr.decode('utf-8', errors='replace')}")
+
+async def transcribe_audio_chunk(audio_path: str) -> str:
+    async with vision_groq_semaphore:
+        client = AsyncGroq(api_key=os.environ.get("GROQ_API_KEY"))
+        try:
+            with open(audio_path, "rb") as f:
+                transcription = await asyncio.wait_for(client.audio.transcriptions.create(
+                    file=(os.path.basename(audio_path), f.read()),
+                    model="whisper-large-v3-turbo",
+                    response_format="text"
+                ), timeout=60.0)
+            return transcription if isinstance(transcription, str) else transcription.text
+        except Exception as e:
+            print(f"Chunk transcription failed: {e}")
+            return "[transcription gap]"
+
+async def get_local_video_transcript(file_path: str) -> str:
+    """Extract audio and transcribe local video using Whisper."""
+    existing = await check_local_subtitles(file_path)
+    if existing:
+        return existing
+        
+    temp_dir = tempfile.mkdtemp(prefix="audio_ext_")
+    audio_path = os.path.join(temp_dir, "audio.mp3")
+    
+    try:
+        async with ffmpeg_semaphore:
+            cmd = [
+                "ffmpeg", "-y", "-i", file_path, 
+                "-vn", "-acodec", "libmp3lame", "-q:a", "2", 
+                audio_path
+            ]
+            process = await asyncio.create_subprocess_exec(
+                *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+            )
+            stdout, stderr = await process.communicate()
+            if process.returncode != 0:
+                raise Exception(f"Audio extraction failed: {stderr.decode('utf-8', errors='replace')}")
+                
+        file_size = os.path.getsize(audio_path)
+        max_size = 25 * 1024 * 1024
+        
+        if file_size <= max_size:
+            transcript = await transcribe_audio_chunk(audio_path)
+            return transcript
+            
+        # Needs chunking
+        target_bitrate_bps = 256000 # 256kbps conservative
+        chunk_seconds = (max_size * 8 * 0.85) / target_bitrate_bps
+        
+        probe_cmd = [
+            "ffprobe", "-v", "error", "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1", audio_path
+        ]
+        probe_proc = await asyncio.create_subprocess_exec(
+            *probe_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        )
+        probe_out, _ = await probe_proc.communicate()
+        try:
+            total_duration = float(probe_out.strip())
+        except ValueError:
+            total_duration = file_size / (target_bitrate_bps / 8)
+            
+        chunks = []
+        current_sec = 0.0
+        overlap = 2.0
+        chunk_idx = 0
+        
+        while current_sec < total_duration:
+            chunk_out = os.path.join(temp_dir, f"chunk_{chunk_idx}.mp3")
+            duration = min(chunk_seconds, total_duration - current_sec)
+            if duration <= 0: break
+            
+            async with ffmpeg_semaphore:
+                await extract_audio_chunk(audio_path, chunk_out, current_sec, duration)
+                
+            chunks.append(chunk_out)
+            current_sec += (duration - overlap)
+            chunk_idx += 1
+            
+        tasks = [transcribe_audio_chunk(c) for c in chunks]
+        results = await asyncio.gather(*tasks)
+        
+        return " ".join(results)
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)

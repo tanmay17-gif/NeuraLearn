@@ -108,7 +108,7 @@ def find_concept_matches(
         prompt = _build_merge_prompt(new_nodes, existing_concepts)
         completion = groq_client.chat.completions.create(
             messages=[{"role": "user", "content": prompt}],
-            model="llama-3.3-70b-versatile",
+            model="openai/gpt-oss-120b",
             response_format={"type": "json_object"},
             max_tokens=512,
         )
@@ -279,7 +279,7 @@ def map_vision_to_concepts(user_id: str, video_id: str, vision_markdown: str, jw
         """
         completion = groq_client.chat.completions.create(
             messages=[{"role": "user", "content": prompt}],
-            model="llama-3.3-70b-versatile",
+            model="openai/gpt-oss-120b",
             response_format={"type": "json_object"},
             max_tokens=512,
         )

@@ -704,7 +704,7 @@ function App() {
                       {activeTab === 'flashcards' && (
                         modules.flashcards ? (
                           <div>
-                            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: '1.5rem' }}>
+                            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: '1.5rem', alignItems: 'stretch' }}>
                               {modules.flashcards.map((c, i) => (
                                 <Flashcard 
                                   key={i} 
