@@ -177,7 +177,6 @@ async def upload_video(
         except Exception as e:
             print(f"Fallback to legacy process_uploaded_video due to: {e}")
             result = await engine.process_uploaded_video(file_path, master_prompt=master_prompt)
-        os.remove(file_path)
         
         latency = int((time.time() - start_t) * 1000)
         from services.supabase_client import supabase
@@ -213,12 +212,13 @@ async def upload_video(
             custom_insights=result["custom_insights"]
         )
     except Exception as e:
-        if file_path:
+        raise HTTPException(status_code=500, detail="Video processing failed.")
+    finally:
+        if file_path and os.path.exists(file_path):
             try:
-                if os.path.exists(file_path): os.remove(file_path)
+                os.remove(file_path)
             except Exception:
                 pass
-        raise HTTPException(status_code=500, detail="Video processing failed.")
 
 @api_router.post("/process", response_model=ProcessingResponse)
 async def process_video(
