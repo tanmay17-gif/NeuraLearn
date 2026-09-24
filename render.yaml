@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: neuralearn-api
+    name: prism-api
     runtime: python
     rootDir: backend
     plan: free

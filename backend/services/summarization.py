@@ -24,7 +24,7 @@ async def generate_quick_digest(transcript: str, level: str = "intermediate") ->
     instruction = level_instructions.get(level.lower(), level_instructions["intermediate"])
 
     prompt = f"""
-    You are NeuraLearn AI, a research-grade knowledge assistant.
+    You are PRISM, a research-grade knowledge assistant.
     Provide a 5-bullet TLDR summary of the following video transcript.
     
     TARGET AUDIENCE LEVEL: {level.upper()}

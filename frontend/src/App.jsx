@@ -423,7 +423,7 @@ function App() {
             <div style={{ width: '48px', height: '48px', background: 'var(--primary)', borderRadius: '16px', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'white', boxShadow: '0 10px 25px rgba(79, 70, 229, 0.3)' }}>
               <Brain size={28} />
             </div>
-            <h1 style={{ margin: 0, fontSize: '1.8rem', fontWeight: 900, letterSpacing: '-0.05em' }}>NeuraLearn</h1>
+            <h1 style={{ margin: 0, fontSize: '1.8rem', fontWeight: 900, letterSpacing: '-0.05em' }}>PRISM</h1>
           </div>
 
           {isLoggedIn && (
