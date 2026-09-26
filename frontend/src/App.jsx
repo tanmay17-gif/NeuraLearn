@@ -35,6 +35,11 @@ import GlobalGraphView from './GlobalGraphView';
 const _apiRoot = import.meta.env.VITE_API_URL;
 const API_BASE = _apiRoot ? `${_apiRoot.replace(/\/api$/, '')}/api` : '/api';
 
+// --- FEATURE FLAGS ---
+const ENABLE_GRAPH_INTERFACE = false;
+const ENABLE_KNOWLEDGE_GRAPH_MODULE = false;
+const ENABLE_CONCEPT_MASTERY = false;
+
 axios.interceptors.request.use(async (config) => {
   const { data: { session } } = await supabase.auth.getSession();
   if (session?.access_token) {
@@ -82,7 +87,7 @@ const Flashcard = ({ question, answer, concept_id, onFeedback }) => {
           <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', overflowY: 'auto' }}>
             {answer}
           </div>
-          {concept_id && (
+          {concept_id && ENABLE_CONCEPT_MASTERY && (
             <div style={{ marginTop: '1rem', display: 'flex', gap: '0.5rem', borderTop: '1px solid rgba(255,255,255,0.2)', paddingTop: '0.75rem', width: '100%', justifyContent: 'center' }}>
               <button 
                 onClick={(e) => handleRating(e, true)}
@@ -336,12 +341,14 @@ function App() {
     </motion.div>
   );
 
-  const FeedbackControls = ({ moduleType }) => (
+  const FeedbackControls = ({ moduleType }) => {
+    const [showOptions, setShowOptions] = useState(false);
+    return (
     <div style={{ display: 'flex', gap: '0.75rem', marginTop: '2.5rem', alignItems: 'center', paddingTop: '1.5rem', borderTop: '1px solid #F1F5F9' }}>
       <span style={{ fontSize: '0.8rem', color: 'var(--text-dim)', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Insight helpful?</span>
-      <div style={{ display: 'flex', gap: '0.5rem' }}>
+      <div style={{ display: 'flex', gap: '0.5rem', position: 'relative' }}>
         <button 
-          onClick={() => handleFeedback(moduleType, 'up')}
+          onClick={() => { handleFeedback(moduleType, 'up'); setShowOptions(false); }}
           style={{ 
             padding: '0.6rem 1rem', borderRadius: '0.75rem', border: '1px solid #E2E8F0', background: feedback[moduleType] === 'up' ? 'var(--primary)' : 'white', 
             color: feedback[moduleType] === 'up' ? 'white' : 'var(--text-dim)', cursor: 'pointer', transition: 'all 0.2s ease', display: 'flex', alignItems: 'center', gap: '0.4rem', fontWeight: 600
@@ -349,18 +356,27 @@ function App() {
         >
           <span>👍</span> {feedback[moduleType] === 'up' ? 'Helpful' : ''}
         </button>
-        <button 
-          onClick={() => handleFeedback(moduleType, 'down')}
-          style={{ 
-            padding: '0.6rem 1rem', borderRadius: '0.75rem', border: '1px solid #E2E8F0', background: feedback[moduleType] === 'down' ? 'var(--accent)' : 'white', 
-            color: feedback[moduleType] === 'down' ? 'white' : 'var(--text-dim)', cursor: 'pointer', transition: 'all 0.2s ease', display: 'flex', alignItems: 'center', gap: '0.4rem', fontWeight: 600
-          }}
-        >
-          <span>👎</span> {feedback[moduleType] === 'down' ? 'Not for me' : ''}
-        </button>
+        <div style={{ position: 'relative' }}>
+          <button 
+            onClick={() => setShowOptions(!showOptions)}
+            style={{ 
+              padding: '0.6rem 1rem', borderRadius: '0.75rem', border: '1px solid #E2E8F0', background: ['down', 'too_long', 'too_technical', 'wrong_format'].includes(feedback[moduleType]) ? 'var(--accent)' : 'white', 
+              color: ['down', 'too_long', 'too_technical', 'wrong_format'].includes(feedback[moduleType]) ? 'white' : 'var(--text-dim)', cursor: 'pointer', transition: 'all 0.2s ease', display: 'flex', alignItems: 'center', gap: '0.4rem', fontWeight: 600
+            }}
+          >
+            <span>👎</span> {['down', 'too_long', 'too_technical', 'wrong_format'].includes(feedback[moduleType]) ? 'Not for me' : ''}
+          </button>
+          {showOptions && (
+            <div style={{ position: 'absolute', top: '100%', left: 0, marginTop: '0.5rem', background: 'white', border: '1px solid #E2E8F0', borderRadius: '0.75rem', padding: '0.5rem', boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.1)', zIndex: 10, display: 'flex', flexDirection: 'column', gap: '0.25rem', minWidth: '150px' }}>
+              <button onClick={() => { handleFeedback(moduleType, 'too_long'); setShowOptions(false); }} style={{ padding: '0.5rem', textAlign: 'left', background: 'none', border: 'none', cursor: 'pointer', borderRadius: '0.5rem', fontSize: '0.85rem' }}>Too long</button>
+              <button onClick={() => { handleFeedback(moduleType, 'too_technical'); setShowOptions(false); }} style={{ padding: '0.5rem', textAlign: 'left', background: 'none', border: 'none', cursor: 'pointer', borderRadius: '0.5rem', fontSize: '0.85rem' }}>Too technical</button>
+              <button onClick={() => { handleFeedback(moduleType, 'wrong_format'); setShowOptions(false); }} style={{ padding: '0.5rem', textAlign: 'left', background: 'none', border: 'none', cursor: 'pointer', borderRadius: '0.5rem', fontSize: '0.85rem' }}>Wrong format</button>
+            </div>
+          )}
+        </div>
       </div>
     </div>
-  );
+  )};
 
   return (
     <div style={{ minHeight: '100vh', position: 'relative' }}>
@@ -423,7 +439,7 @@ function App() {
             <div style={{ width: '48px', height: '48px', background: 'var(--primary)', borderRadius: '16px', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'white', boxShadow: '0 10px 25px rgba(79, 70, 229, 0.3)' }}>
               <Brain size={28} />
             </div>
-            <h1 style={{ margin: 0, fontSize: '1.8rem', fontWeight: 900, letterSpacing: '-0.05em' }}>PRISM</h1>
+            <h1 style={{ margin: 0, fontSize: '1.8rem', fontWeight: 900, letterSpacing: '-0.05em' }}>System X</h1>
           </div>
 
           {isLoggedIn && (
@@ -615,8 +631,8 @@ function App() {
                         { id: 'notes', label: 'Study Notes', icon: FileText },
                         { id: 'visual', label: 'Visual Insights', icon: Youtube },
                         { id: 'flashcards', label: 'Active Recall', icon: GraduationCap },
-                        { id: 'map', label: 'Concept Map', icon: Network }
-                      ].map(tab => (
+                        ENABLE_KNOWLEDGE_GRAPH_MODULE ? { id: 'map', label: 'Concept Map', icon: Network } : null
+                      ].filter(Boolean).map(tab => (
                         <button 
                           key={tab.id} onClick={() => setActiveTab(tab.id)}
                           style={{ 

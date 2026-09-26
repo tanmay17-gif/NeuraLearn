@@ -40,7 +40,10 @@ async def extract_frames(video_url: str, max_frames: int = 3) -> List[str]:
                 _, buffer = cv2.imencode('.jpg', frame)
                 frames_b64.append(base64.b64encode(buffer).decode('utf-8'))
         cap.release()
-    except Exception: pass
+        print("[METRIC] Extraction: Success (Frames)")
+    except Exception as e:
+        print(f"[METRIC] Extraction: Failed (Frames) - {e}")
+        pass
     return frames_b64
 
 async def generate_summary_with_prompt(transcript: str, master_prompt: str) -> Dict[str, Any]:
@@ -143,6 +146,7 @@ async def process_uploaded_video(file_path: str, master_prompt: str) -> Dict[str
                 pass
 
             transcript_text = transcription if isinstance(transcription, str) else transcription.text
+            print("[METRIC] Extraction: Success (Audio)")
 
             # Generate summary using existing Groq text pipeline
             engine_result = await generate_summary_with_prompt(transcript_text, master_prompt=master_prompt)
@@ -389,8 +393,11 @@ async def extract_knowledge_graph(transcript: str, user_id: str, video_id: str) 
             response_format={"type": "json_object"}
         )
         content = completion.choices[0].message.content
-        return json.loads(content)
+        parsed = json.loads(content)
+        print("[METRIC] JSON Parse: Success (Knowledge Graph)")
+        return parsed
     except Exception as e:
+        print(f"[METRIC] JSON Parse: Failed (Knowledge Graph) - {e}")
         print(f"Graph extraction failed: {e}")
         return {"nodes": [], "edges": []}
 
@@ -438,6 +445,8 @@ async def generate_flashcards(transcript: str, user_id: str = "default_user", vi
             response_format={"type": "json_object"}
         )
         data = json.loads(completion.choices[0].message.content)
+        print("[METRIC] JSON Parse: Success (Flashcards)")
         return data.get("flashcards", [])
-    except Exception:
+    except Exception as e:
+        print(f"[METRIC] JSON Parse: Failed (Flashcards) - {e}")
         return []

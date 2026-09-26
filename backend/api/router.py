@@ -234,6 +234,23 @@ async def process_video(
     cache_key = f"process:{hashlib.md5((request.url + request.level + request.dynamic_extra + user_id + str(request.use_profile)).encode()).hexdigest()}"
     cached = await get_cached_synthesis(cache_key)
     if cached:
+        from services.supabase_client import supabase
+        if supabase:
+            try:
+                prof_version = get_profile(user_id, jwt=jwt).get("profile_version", 1) if request.use_profile else None
+                supabase.table("generation_log", jwt=jwt).insert({
+                    "user_id": user_id,
+                    "video_id": cached.get("video_id", request.url),
+                    "use_profile": request.use_profile,
+                    "profile_version_used": prof_version,
+                    "prompt_text": "CACHE_HIT",
+                    "summary_output": " ".join(cached.get("summary", [])),
+                    "model_name": "cache",
+                    "latency_ms": 0,
+                    "cache_hit": True
+                })
+            except Exception:
+                pass
         return ProcessingResponse(**cached)
 
     try:

@@ -51,7 +51,9 @@ CREATE TABLE IF NOT EXISTS profiles (
     user_id UUID PRIMARY KEY REFERENCES auth.users,
     persona_blueprint TEXT,
     instructions JSONB,
-    maturity_score INTEGER DEFAULT 0,
+    support_level INTEGER DEFAULT 0,
+    preferred_length TEXT DEFAULT 'default',
+    preferred_format TEXT DEFAULT 'bullets',
     profile_version INTEGER DEFAULT 1,
     feedback_count INTEGER DEFAULT 0,
     last_updated TIMESTAMP WITH TIME ZONE DEFAULT NOW()

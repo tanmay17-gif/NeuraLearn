@@ -26,7 +26,7 @@ async def generate_flashcards(transcript: str, level: str = "intermediate") -> L
     }
 
     prompt = f"""
-    You are PRISM, a specialized learning scientist.
+    You are System X, a specialized learning scientist.
     Based on the provided video transcript, generate a set of 5-7 high-quality flashcards.
     
     TARGET AUDIENCE LEVEL: {level.upper()}

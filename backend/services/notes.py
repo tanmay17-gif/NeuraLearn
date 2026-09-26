@@ -27,7 +27,7 @@ async def generate_structured_notes(transcript: str, level: str = "intermediate"
     instruction = level_instructions.get(level.lower(), level_instructions["intermediate"])
 
     prompt = f"""
-    You are PRISM, a research-grade knowledge assistant.
+    You are System X, a research-grade knowledge assistant.
     Convert the following video transcript into high-quality, structured academic notes.
     
     TARGET AUDIENCE LEVEL: {level.upper()}

@@ -5,7 +5,7 @@ from services.supabase_client import supabase
 
 def get_profile(user_id: str = "default_user", jwt: Optional[str] = None) -> Dict[str, Any]:
     """Fetches user profile from Supabase with default fallback."""
-    default_prof = {"user_id": user_id, "persona_blueprint": "", "instructions": [], "maturity_score": 0, "profile_version": 1, "feedback_count": 0}
+    default_prof = {"user_id": user_id, "persona_blueprint": "", "instructions": [], "support_level": 0, "preferred_length": "default", "preferred_format": "bullets", "profile_version": 1, "feedback_count": 0}
     if not supabase:
         return default_prof
 
@@ -29,7 +29,7 @@ def save_profile(user_id: str, profile: Dict[str, Any], trigger_event: str = "Pr
         print("[profile] No supabase client — skipping save.")
         return
 
-    allowed_keys = ["user_id", "persona_blueprint", "instructions", "maturity_score", "profile_version", "feedback_count"]
+    allowed_keys = ["user_id", "persona_blueprint", "instructions", "support_level", "preferred_length", "preferred_format", "profile_version", "feedback_count"]
     clean_profile = {k: v for k, v in profile.items() if k in allowed_keys}
     clean_profile["last_updated"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
 
@@ -66,18 +66,20 @@ def update_persona_blueprint(user_id: str, blueprint: str, jwt: Optional[str] = 
 def update_preference(user_id: str, level: str, rating: str, jwt: Optional[str] = None):
     """Evolve Persona: Derives behaviors from ratings."""
     profile = get_profile(user_id, jwt=jwt)
-    if rating == "down":
-        behavior_map = {
-            "beginner": "Avoid over-simplification. Use precise analogies.",
-            "intermediate": "Increase technical density. Focus on architecture.",
-            "expert": "Deeper synthesis required. Assume mastery of basics."
-        }
-        new_instruction = behavior_map.get(level, "Refine tone for higher technical precision.")
-        if "instructions" not in profile: profile["instructions"] = []
-        if new_instruction not in profile["instructions"]:
-            profile["instructions"].append(new_instruction)
+    if rating == "up":
+        # Decrease support level (increase detail), min 0
+        profile["support_level"] = max(0, profile.get("support_level", 0) - 1)
+    elif rating == "down":
+        pass # Handle general down if necessary
+    elif rating == "too_long":
+        profile["preferred_length"] = "shorter"
+    elif rating == "too_technical":
+        # Increase support level (simplify content)
+        profile["support_level"] = profile.get("support_level", 0) + 1
+    elif rating == "wrong_format":
+        current_format = profile.get("preferred_format", "bullets")
+        profile["preferred_format"] = "paragraph" if current_format == "bullets" else "bullets"
 
-    profile["maturity_score"] = profile.get("maturity_score", 0) + 1
     profile["profile_version"] = profile.get("profile_version", 0) + 1
     profile["feedback_count"] = profile.get("feedback_count", 0) + 1
 
@@ -89,12 +91,20 @@ def get_master_prompt(user_id: str, dynamic_extra: str = "", jwt: Optional[str] 
     profile = get_profile(user_id, jwt=jwt)
     blueprint = profile.get("persona_blueprint", "")
     learned = profile.get("instructions", [])
+    support_level = profile.get("support_level", 0)
+    preferred_length = profile.get("preferred_length", "default")
+    preferred_format = profile.get("preferred_format", "bullets")
 
     prompt = "## CORE PERSONA BLUEPRINT\n"
     if blueprint:
         prompt += f"{blueprint}\n"
     else:
         prompt += "The user is a high-level intellectual seeking deep synthesis.\n"
+
+    prompt += "\n## PERSONALIZATION SETTINGS:\n"
+    prompt += f"- Support Level (Complexity Reduction): {support_level} (Higher = Simpler Vocabulary/Concepts)\n"
+    prompt += f"- Preferred Length: {preferred_length}\n"
+    prompt += f"- Preferred Format: {preferred_format}\n"
 
     if learned:
         prompt += "\n## REFINED BEHAVIORAL PATTERNS (LEARNED):\n"
@@ -104,7 +114,7 @@ def get_master_prompt(user_id: str, dynamic_extra: str = "", jwt: Optional[str] 
     if dynamic_extra:
         prompt += f"\n## DYNAMIC USER INTENT:\n{dynamic_extra}\n"
 
-    prompt += "\n## OPERATING PROTOCOLS:\n1. Prioritize structural logic.\n2. Assume high baseline intelligence.\n3. Maintain Blueprint tone."
+    prompt += "\n## OPERATING PROTOCOLS:\n1. Prioritize structural logic.\n2. Assume high baseline intelligence.\n3. Adjust vocabulary based on Support Level.\n4. Follow Preferred Length and Format strictly."
     return prompt
 
 def get_system_instructions(user_id: str = "default_user") -> str:

@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: prism-api
+    name: system-x-api
     runtime: python
     rootDir: backend
     plan: free

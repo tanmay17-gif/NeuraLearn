@@ -7,7 +7,7 @@ load_dotenv()
 
 from api.router import api_router
 
-app = FastAPI(title="PRISM API", version="0.1.0")
+app = FastAPI(title="System X API", version="0.1.0")
 
 # CORS — allow localhost for dev, and the deployed frontend URL from env
 _allowed_origins_env = os.getenv("ALLOWED_ORIGINS", "")
@@ -29,7 +29,7 @@ app.include_router(api_router, prefix="/api")
 
 @app.get("/")
 async def root():
-    return {"message": "PRISM API is running", "status": "online"}
+    return {"message": "System X API is running", "status": "online"}
 
 if __name__ == "__main__":
     import uvicorn

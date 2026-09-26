@@ -89,7 +89,7 @@ async def generate_multimodal_summary(transcript: str, frames_b64: List[str], le
     # We send the transcript + the frames as images
     
     prompt = f"""
-    You are PRISM, a research-grade knowledge assistant specialized in multimodal analysis.
+    You are System X, a research-grade knowledge assistant specialized in multimodal analysis.
     You have been provided with a video transcript and key frames from the video.
     
     TASK: Generate a "Visual-Semantic Synthesis" summary.

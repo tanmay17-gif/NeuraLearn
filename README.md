@@ -1,12 +1,12 @@
-# PRISM
+# System X
 
-PRISM is a personal AI-powered learning assistant that transforms video content — YouTube links or local uploads — into structured, personalized study material. It adapts to how you learn, getting smarter the more you use it.
+System X is a personal AI-powered learning assistant that transforms video content — YouTube links or local uploads — into structured, personalized study material. It adapts to how you learn, getting smarter the more you use it.
 
 ---
 
 ## What it does
 
-You paste a YouTube link or upload a local video. PRISM handles everything from there — it fetches or extracts the transcript, runs it through AI, and gives you five different ways to actually understand and retain the content:
+You paste a YouTube link or upload a local video. System X handles everything from there — it fetches or extracts the transcript, runs it through AI, and gives you five different ways to actually understand and retain the content:
 
 - **Quick Digest** — 5 high-signal bullet points distilled from the video
 - **Study Notes** — Full research-grade markdown notes with sections like Abstract, Core Concepts, Critical Analysis
