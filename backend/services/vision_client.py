@@ -2,11 +2,14 @@ import os
 import asyncio
 import time
 import base64
+import logging
 from typing import Dict, Any, Optional
 from groq import AsyncGroq
 import google.genai as genai
 from google.genai import types as genai_types
 from services.profile import get_master_prompt
+
+logger = logging.getLogger(__name__)
 
 # Circuit breaker state
 class CircuitBreaker:
@@ -40,20 +43,75 @@ def encode_image(image_path: str) -> str:
     with open(image_path, "rb") as image_file:
         return base64.b64encode(image_file.read()).decode('utf-8')
 
-async def explain_frame_with_vision(image_path: str, user_id: str, dynamic_extra: str = "") -> Dict[str, Any]:
+async def explain_frame_with_vision(
+    image_path: str,
+    user_id: str,
+    dynamic_extra: str = "",
+    jwt: Optional[str] = None,
+) -> Dict[str, Any]:
     """
-    Explains a video frame using Groq Vision with fallback to Gemini.
+    Explains a video frame using Gemini with Groq Vision as a fallback.
     """
-    system_prompt = get_master_prompt(user_id, dynamic_extra)
+    system_prompt = get_master_prompt(user_id, dynamic_extra, jwt=jwt)
     base64_image = encode_image(image_path)
-    
-    # 1. Try Groq Vision
+
+    provider_errors = []
+    api_key = os.getenv("GOOGLE_API_KEY")
+    if api_key:
+        client = genai.Client(api_key=api_key)
+
+        def _call_gemini():
+            return client.models.generate_content(
+                model="gemini-3.5-flash-lite",
+                contents=[
+                    system_prompt,
+                    "Explain this frame in detail. What is being shown? "
+                    "(e.g. diagram, code, slide, chart)",
+                    genai_types.Part(
+                        inline_data=genai_types.Blob(
+                            mime_type="image/jpeg",
+                            data=base64.b64decode(base64_image),
+                        )
+                    ),
+                ],
+            )
+
+        for attempt in range(2):
+            try:
+                response = await asyncio.to_thread(_call_gemini)
+                explanation = (response.text or "").strip()
+                if explanation:
+                    return {"explanation": explanation, "provider": "gemini"}
+                raise RuntimeError("Gemini returned an empty frame explanation.")
+            except Exception as error:
+                provider_errors.append(f"Gemini: {error}")
+                status_code = getattr(error, "status_code", None)
+                is_transient = status_code in {408, 429, 500, 502, 503, 504} or any(
+                    marker in str(error).upper()
+                    for marker in ("UNAVAILABLE", "RESOURCE_EXHAUSTED", "429")
+                )
+                if attempt == 0 and is_transient:
+                    logger.warning(
+                        "Gemini Vision returned a transient error; retrying once: %s",
+                        error,
+                    )
+                    await asyncio.sleep(1)
+                else:
+                    logger.warning("Gemini Vision failed: %s", error)
+                    break
+    else:
+        provider_errors.append("Gemini: GOOGLE_API_KEY is not configured")
+
+    # Fall back to Groq Vision.
     if not groq_breaker.is_open():
         try:
             async with vision_groq_semaphore:
-                client = AsyncGroq(api_key=os.environ.get("GROQ_API_KEY"))
+                groq_api_key = os.environ.get("GROQ_API_KEY")
+                if not groq_api_key:
+                    raise RuntimeError("GROQ_API_KEY is not configured")
+                client = AsyncGroq(api_key=groq_api_key)
                 response = await asyncio.wait_for(client.chat.completions.create(
-                    model="llama-3.2-11b-vision-preview",
+                    model="qwen/qwen3.8-27b",
                     messages=[
                         {
                             "role": "system",
@@ -74,44 +132,20 @@ async def explain_frame_with_vision(image_path: str, user_id: str, dynamic_extra
                     ],
                     temperature=0.2,
                     max_tokens=1024,
-                ), timeout=8.0)
+                ), timeout=30.0)
                 
                 explanation = response.choices[0].message.content
+                if not explanation or not explanation.strip():
+                    raise RuntimeError("Groq returned an empty frame explanation.")
                 groq_breaker.record_success()
-                return {"explanation": explanation, "provider": "groq"}
-        except Exception as e:
-            print(f"[vision_client] Groq Vision failed: {e}")
+                return {"explanation": explanation.strip(), "provider": "groq"}
+        except Exception as error:
+            provider_errors.append(f"Groq: {error}")
+            logger.exception("Groq Vision failed")
             groq_breaker.record_failure()
     else:
-        print("[vision_client] Groq Vision circuit breaker is open, skipping to Gemini fallback.")
+        provider_errors.append("Groq: vision circuit breaker is open")
 
-    # 2. Fallback to Gemini 2.0 Flash
-    try:
-        api_key = os.getenv("GOOGLE_API_KEY")
-        if not api_key:
-            raise Exception("No GOOGLE_API_KEY available for Gemini fallback.")
-            
-        client = genai.Client(api_key=api_key)
-        
-        def _call_gemini():
-            return client.models.generate_content(
-                model="gemini-2.0-flash",
-                contents=[
-                    system_prompt,
-                    "Explain this frame in detail. What is being shown? (e.g. diagram, code, slide, chart)",
-                    genai_types.Part(
-                        inline_data=genai_types.Blob(
-                            mime_type="image/jpeg",
-                            data=base64.b64decode(base64_image)
-                        )
-                    )
-                ]
-            )
-            
-        loop = asyncio.get_event_loop()
-        response = await loop.run_in_executor(None, _call_gemini)
-        explanation = response.text.strip()
-        return {"explanation": explanation, "provider": "gemini"}
-    except Exception as e:
-        print(f"[vision_client] Gemini Vision fallback failed: {e}")
-        raise Exception("All vision providers failed.")
+    raise RuntimeError(
+        "All vision providers failed. " + " | ".join(provider_errors)
+    )

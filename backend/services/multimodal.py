@@ -119,7 +119,7 @@ async def generate_multimodal_summary(transcript: str, frames_b64: List[str], le
     
     try:
         response = client.models.generate_content(
-            model='gemini-2.0-flash',
+            model='gemini-3.8-flash',
             contents=contents
         )
         return response.text

@@ -27,6 +27,8 @@ import {
   Sparkles,
   Upload,
   Link as LinkIcon,
+  ThumbsDown,
+  ThumbsUp,
   X
 } from 'lucide-react';
 import KnowledgeGraph from './KnowledgeGraph';
@@ -234,7 +236,7 @@ function App() {
     } catch (err) { console.error("Search error", err); }
   };
 
-  const handleFeedback = async (moduleType, rating) => {
+  const handleFeedback = async (moduleType, rating, customFeedback = '') => {
     setFeedback(prev => ({ ...prev, [moduleType]: rating }));
     try {
       await axios.post(`${API_BASE}/feedback`, {
@@ -242,6 +244,7 @@ function App() {
         module: moduleType,
         rating: rating,
         level: level,
+        custom_feedback: customFeedback,
         user_id: userId
       });
       // Refresh profile to show updated automated instructions if any
@@ -251,7 +254,7 @@ function App() {
 
   const handleNegativeFeedback = async (moduleType, feedbackType, customFeedback = '') => {
     // First save the standard preference signal
-    await handleFeedback(moduleType, feedbackType);
+    await handleFeedback(moduleType, feedbackType, customFeedback);
     // Then call AI to refine persona (only for logged-in users with a persona set)
     if (!isLoggedIn || !userId) return;
     try {
@@ -284,7 +287,7 @@ function App() {
       let data;
       if (sourceType === 'youtube') {
         const response = await axios.post(`${API_BASE}/process`, { 
-          url, level, user_id: userId, dynamic_extra: dynamicExtra
+          url, level, user_id: userId, dynamic_extra: dynamicExtra, use_profile: true
         });
         data = response.data;
       } else {
@@ -293,6 +296,7 @@ function App() {
         formData.append('level', level);
         formData.append('user_id', userId || 'default_user');
         formData.append('dynamic_extra', dynamicExtra);
+        formData.append('use_profile', 'true');
         
         const response = await axios.post(`${API_BASE}/upload`, formData, {
           headers: { 'Content-Type': 'multipart/form-data' }
@@ -317,6 +321,8 @@ function App() {
         transcript: result.transcript, 
         video_url: url,
         level: level,
+        dynamic_extra: dynamicExtra,
+        use_profile: true,
         user_id: userId
       });
       const data = response.data.data;
@@ -343,11 +349,11 @@ function App() {
   const handleCopy = (text, type) => {
     let content = text;
     if (type === 'digest') {
-      // Copy custom_insights if shown, otherwise join summary bullets
+      if (Array.isArray(text)) {
+        content = text.join('\n\n');
+      }
       if (result?.custom_insights) {
-        content = result.custom_insights;
-      } else if (Array.isArray(text)) {
-        content = text.join('\n');
+        content += `\n\n${result.custom_insights}`;
       }
     }
     navigator.clipboard.writeText(content);
@@ -381,10 +387,10 @@ function App() {
     const [refining, setRefining] = useState(false);
 
     const negativeOptions = [
-      { key: 'too_long', label: '📏 Too long' },
-      { key: 'too_technical', label: '🔬 Too technical' },
-      { key: 'wrong_format', label: '📄 Wrong format' },
-      { key: 'other', label: '✏️ Other (tell us)' },
+      { key: 'too_long', label: 'Too long' },
+      { key: 'too_technical', label: 'Too technical' },
+      { key: 'wrong_format', label: 'Wrong format' },
+      { key: 'other', label: 'Something else' },
     ];
 
     const isNegative = negativeOptions.some(o => feedback[moduleType] === o.key) || feedback[moduleType] === 'down';
@@ -411,45 +417,45 @@ function App() {
     };
 
     return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem', marginTop: '2.5rem', paddingTop: '1.5rem', borderTop: '1px solid #F1F5F9' }}>
-      <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center', flexWrap: 'wrap' }}>
+    <div className="feedback-controls">
+      <div className="feedback-heading">
         <span style={{ fontSize: '0.8rem', color: 'var(--text-dim)', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Insight helpful?</span>
-        <div style={{ display: 'flex', gap: '0.5rem', position: 'relative', flexWrap: 'wrap', alignItems: 'center' }}>
+        <div className="feedback-buttons">
           <button 
             onClick={() => { handleFeedback(moduleType, 'up'); setShowOptions(false); setShowCustom(false); }}
+            className={`feedback-button${feedback[moduleType] === 'up' ? ' is-selected' : ''}`}
             style={{ 
-              padding: '0.6rem 1rem', borderRadius: '0.75rem', border: '1px solid #E2E8F0', background: feedback[moduleType] === 'up' ? 'var(--primary)' : 'white', 
-              color: feedback[moduleType] === 'up' ? 'white' : 'var(--text-dim)', cursor: 'pointer', transition: 'all 0.2s ease', display: 'flex', alignItems: 'center', gap: '0.4rem', fontWeight: 600
+              background: feedback[moduleType] === 'up' ? 'var(--primary)' : undefined,
+              color: feedback[moduleType] === 'up' ? 'white' : undefined
             }}
           >
-            <span>👍</span> {feedback[moduleType] === 'up' ? 'Helpful' : ''}
+            <ThumbsUp size={16} strokeWidth={2} />
+            <span>Helpful</span>
           </button>
           <div style={{ position: 'relative' }}>
             <button 
               onClick={() => { setShowOptions(!showOptions); setShowCustom(false); }}
               disabled={refining}
+              className={`feedback-button${isNegative ? ' is-selected' : ''}`}
               style={{ 
-                padding: '0.6rem 1rem', borderRadius: '0.75rem', border: '1px solid #E2E8F0',
-                background: isNegative ? 'var(--accent)' : refining ? '#F1F5F9' : 'white', 
-                color: isNegative ? 'white' : refining ? 'var(--text-dim)' : 'var(--text-dim)',
-                cursor: refining ? 'default' : 'pointer', transition: 'all 0.2s ease', display: 'flex', alignItems: 'center', gap: '0.4rem', fontWeight: 600
+                background: isNegative ? 'var(--primary)' : undefined,
+                color: isNegative ? 'white' : undefined,
+                cursor: refining ? 'default' : undefined
               }}
             >
               {refining ? (
                 <><RefreshCw size={14} className="animate-spin" /> Refining persona...</>
               ) : (
-                <><span>👎</span> {isNegative ? 'Not for me' : ''}</>
+                <><ThumbsDown size={16} strokeWidth={2} /><span>Not for me</span></>
               )}
             </button>
             {showOptions && (
-              <div style={{ position: 'absolute', top: '100%', left: 0, marginTop: '0.5rem', background: 'white', border: '1px solid #E2E8F0', borderRadius: '0.75rem', padding: '0.5rem', boxShadow: '0 8px 24px -4px rgba(0,0,0,0.12)', zIndex: 10, display: 'flex', flexDirection: 'column', gap: '0.25rem', minWidth: '180px' }}>
+              <div className="feedback-menu">
                 {negativeOptions.map(opt => (
                   <button
                     key={opt.key}
                     onClick={() => handleNeg(opt.key)}
-                    style={{ padding: '0.6rem 0.75rem', textAlign: 'left', background: 'none', border: 'none', cursor: 'pointer', borderRadius: '0.5rem', fontSize: '0.85rem', fontWeight: 600, color: 'var(--text-main)', transition: 'background 0.15s' }}
-                    onMouseEnter={e => e.target.style.background = '#F8FAFC'}
-                    onMouseLeave={e => e.target.style.background = 'none'}
+                    className="feedback-menu-option"
                   >
                     {opt.label}
                   </button>
@@ -465,28 +471,29 @@ function App() {
         {showCustom && (
           <motion.div
             initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }}
-            style={{ overflow: 'hidden' }}
+            className="feedback-form-motion"
           >
-            <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'flex-end', padding: '1rem', background: '#F8FAFC', borderRadius: '0.75rem', border: '1px solid #E2E8F0' }}>
+            <div className="feedback-form">
               <div style={{ flex: 1 }}>
-                <p style={{ fontSize: '0.8rem', fontWeight: 700, color: 'var(--primary)', marginBottom: '0.5rem', textTransform: 'uppercase', letterSpacing: '0.04em' }}>✏️ What would you like changed?</p>
+                <label className="feedback-label" htmlFor={`feedback-${moduleType}`}>What would you like changed?</label>
                 <textarea
+                  id={`feedback-${moduleType}`}
                   value={customText}
                   onChange={e => setCustomText(e.target.value)}
-                  placeholder="E.g., Use more real-world examples. Avoid abstract theory..."
-                  style={{ width: '100%', minHeight: '80px', padding: '0.75rem', border: '1px solid #E2E8F0', borderRadius: '0.5rem', fontSize: '0.9rem', resize: 'vertical', fontFamily: 'inherit', outline: 'none', boxSizing: 'border-box' }}
+                  placeholder="Share what would make this more useful..."
+                  className="feedback-textarea"
                   autoFocus
                 />
               </div>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+              <div className="feedback-form-actions">
                 <button
                   onClick={handleCustomSubmit}
                   disabled={!customText.trim()}
-                  style={{ padding: '0.6rem 1.25rem', background: 'var(--primary)', color: 'white', border: 'none', borderRadius: '0.5rem', fontWeight: 700, cursor: customText.trim() ? 'pointer' : 'default', opacity: customText.trim() ? 1 : 0.5, fontSize: '0.85rem', whiteSpace: 'nowrap' }}
+                  className="feedback-submit"
                 >
-                  Apply ✓
+                  Send feedback
                 </button>
-                <button onClick={() => { setShowCustom(false); setCustomText(''); }} style={{ padding: '0.6rem', background: 'none', color: 'var(--text-dim)', border: '1px solid #E2E8F0', borderRadius: '0.5rem', cursor: 'pointer', fontSize: '0.8rem' }}>Cancel</button>
+                <button onClick={() => { setShowCustom(false); setCustomText(''); }} className="feedback-cancel">Cancel</button>
               </div>
             </div>
           </motion.div>
@@ -538,7 +545,7 @@ function App() {
                     initial={{ opacity: 0, y: -10 }} animate={{ opacity: 1, y: 0 }}
                     style={{ marginBottom: '1.5rem', padding: '1rem 1.25rem', background: 'linear-gradient(135deg, rgba(79,70,229,0.08) 0%, rgba(6,182,212,0.08) 100%)', border: '1px solid rgba(79,70,229,0.2)', borderRadius: '1rem', display: 'flex', alignItems: 'center', gap: '0.75rem' }}
                   >
-                    <span style={{ fontSize: '1.4rem' }}>✨</span>
+                    <Sparkles size={20} color="var(--primary)" />
                     <div>
                       <p style={{ margin: 0, fontWeight: 700, fontSize: '0.9rem', color: 'var(--primary)' }}>Persona refined from your feedback</p>
                       <p style={{ margin: 0, fontSize: '0.8rem', color: 'var(--text-dim)', marginTop: '0.2rem' }}>All your key details are preserved. Review the changes below.</p>
@@ -715,10 +722,14 @@ function App() {
                     </div>
                     <textarea 
                       value={dynamicExtra} onChange={(e) => setDynamicExtra(e.target.value)}
-                      placeholder="E.g., Highlight the historical context or explain the mathematical proofs..."
+                      placeholder="E.g., Explain the diagram, compare the charts, or focus on the proof..."
                       className="input-field"
                       style={{ minHeight: '120px', resize: 'vertical', padding: '1.5rem', fontSize: '1rem' }}
                     />
+                    <small style={{ display: 'block', marginTop: '0.5rem', color: 'var(--text-muted)' }}>
+                      Visual requests analyze representative frames across the video. Include a timestamp
+                      (for example, “explain the diagram at 02:15”) to analyze a specific moment.
+                    </small>
                   </div>
 
                   <button type="submit" className="btn-primary" disabled={loading} style={{ width: '100%', justifyContent: 'center', padding: '1.5rem', fontSize: '1.2rem', borderRadius: '1.5rem' }}>
@@ -815,7 +826,6 @@ function App() {
                             </button>
                           </div>
 
-                          {/* ONLY show persona card if custom_insights exist */}
                           {result.custom_insights ? (
                             <motion.div 
                               initial={{ opacity: 0, y: 20 }} 
@@ -841,8 +851,23 @@ function App() {
                                 <ReactMarkdown>{result.custom_insights}</ReactMarkdown>
                               </div>
                             </motion.div>
-                          ) : (
-                            // Fallback: plain summary bullets if no persona insights
+                          ) : null}
+                          {result.summary_format === 'paragraphs' ? (
+                            <div style={{ display: 'grid', gap: '1.25rem' }}>
+                              <section style={{ padding: '1.75rem', background: 'var(--glass)', borderRadius: '1.5rem', border: '1px solid var(--glass-stroke)' }}>
+                                <h3 style={{ margin: '0 0 0.75rem', color: 'var(--primary)' }}>Brief summary</h3>
+                                <div className="markdown-body" style={{ fontSize: '1rem', lineHeight: '1.8', color: 'var(--text-main)' }}>
+                                  <ReactMarkdown>{result.summary[0] || ''}</ReactMarkdown>
+                                </div>
+                              </section>
+                              <section style={{ padding: '1.75rem', background: 'var(--glass)', borderRadius: '1.5rem', border: '1px solid var(--glass-stroke)' }}>
+                                <h3 style={{ margin: '0 0 0.75rem', color: 'var(--primary)' }}>Detailed explanation</h3>
+                                <div className="markdown-body" style={{ fontSize: '1rem', lineHeight: '1.8', color: 'var(--text-main)' }}>
+                                  <ReactMarkdown>{result.summary[1] || ''}</ReactMarkdown>
+                                </div>
+                              </section>
+                            </div>
+                          ) : result.summary_format === 'bullets' || !result.summary_format ? (
                             <div style={{ display: 'grid', gap: '1.5rem' }}>
                               {result.summary.map((b, i) => (
                                 <motion.div initial={{ opacity: 0, x: -10 }} animate={{ opacity: 1, x: 0 }} transition={{ delay: i * 0.05 }} key={i} style={{ display: 'flex', gap: '1.5rem', padding: '1.5rem', background: 'white', borderRadius: '1.5rem', border: '1px solid #E2E8F0' }}>
@@ -850,6 +875,10 @@ function App() {
                                   <div className="markdown-body" style={{ fontSize: '1rem', lineHeight: '1.7', color: 'var(--text-main)', flex: 1 }}><ReactMarkdown>{b}</ReactMarkdown></div>
                                 </motion.div>
                               ))}
+                            </div>
+                          ) : (
+                            <div className="markdown-body" style={{ padding: '1.75rem', background: 'var(--glass)', borderRadius: '1.5rem', border: '1px solid var(--glass-stroke)', fontSize: '1rem', lineHeight: '1.8', color: 'var(--text-main)' }}>
+                              <ReactMarkdown>{result.summary.join('\n\n')}</ReactMarkdown>
                             </div>
                           )}
                           <FeedbackControls moduleType="digest" />
@@ -1001,40 +1030,42 @@ function App() {
               style={{
                 position: 'fixed',
                 bottom: '2rem',
-                left: '50%',
-                transform: 'translateX(-50%)',
                 zIndex: 9998,
-                background: 'linear-gradient(135deg, #1e1b4b 0%, #0f172a 100%)',
-                border: '1px solid rgba(99, 102, 241, 0.4)',
-                borderRadius: '1rem',
-                padding: '1rem 1.5rem',
+                background: 'rgba(255, 255, 255, 0.96)',
+                backdropFilter: 'blur(18px)',
+                border: '1px solid rgba(79, 70, 229, 0.16)',
+                borderRadius: '1.25rem',
+                padding: '1rem 1.25rem',
                 display: 'flex',
                 alignItems: 'center',
-                gap: '1rem',
-                boxShadow: '0 25px 50px -12px rgba(0,0,0,0.5), 0 0 0 1px rgba(99,102,241,0.1)',
-                maxWidth: '420px',
-                width: 'calc(100vw - 4rem)',
+                gap: '0.85rem',
+                boxShadow: '0 20px 55px rgba(15, 23, 42, 0.18)',
+                maxWidth: '460px',
+                width: 'calc(100vw - 2rem)',
+                left: 0,
+                right: 0,
+                margin: '0 auto',
               }}
             >
-              <div style={{ width: '40px', height: '40px', background: 'linear-gradient(135deg, #4f46e5 0%, #06b6d4 100%)', borderRadius: '10px', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
-                <Sparkles size={20} color="white" />
+              <div style={{ width: '40px', height: '40px', background: 'var(--primary-light)', borderRadius: '12px', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                <Sparkles size={20} color="var(--primary)" />
               </div>
               <div style={{ flex: 1, minWidth: 0 }}>
-                <p style={{ margin: 0, fontWeight: 800, fontSize: '0.9rem', color: 'white' }}>✨ Persona Updated!</p>
-                <p style={{ margin: '0.2rem 0 0', fontSize: '0.78rem', color: '#94a3b8', lineHeight: 1.4 }}>
-                  AI refined your persona based on feedback. Key details preserved.
+                <p style={{ margin: 0, fontWeight: 800, fontSize: '0.9rem', color: 'var(--text-main)' }}>Persona updated</p>
+                <p style={{ margin: '0.2rem 0 0', fontSize: '0.78rem', color: 'var(--text-dim)', lineHeight: 1.4 }}>
+                  Your feedback has been used to refine your persona.
                 </p>
               </div>
               <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem', flexShrink: 0 }}>
                 <button
                   onClick={() => { setShowSettings(true); }}
-                  style={{ padding: '0.5rem 0.9rem', background: 'var(--primary)', color: 'white', border: 'none', borderRadius: '0.5rem', fontWeight: 700, cursor: 'pointer', fontSize: '0.78rem', whiteSpace: 'nowrap' }}
+                  className="persona-toast-primary"
                 >
                   View Persona
                 </button>
                 <button
                   onClick={() => setPersonaUpdatedToast(null)}
-                  style={{ padding: '0.4rem', background: 'transparent', color: '#64748b', border: 'none', cursor: 'pointer', fontSize: '0.75rem', textAlign: 'center' }}
+                  className="persona-toast-dismiss"
                 >
                   Dismiss
                 </button>

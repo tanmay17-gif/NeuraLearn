@@ -42,7 +42,7 @@ async def generate_flashcards(transcript: str, level: str = "intermediate") -> L
 
     try:
         response = client.models.generate_content(
-            model='gemini-2.0-flash',
+            model='gemini-3.8-flash',
             contents=[prompt],
             config={
                 'response_mime_type': 'application/json'

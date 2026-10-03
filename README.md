@@ -22,6 +22,8 @@ Everything is personalized. You can set an "Identity Blueprint" — tell it you'
 
 **YouTube videos** go through `youtube-transcript-api` + `yt-dlp` fallback to get the transcript, then Groq's `llama-3.3-70b` handles all text generation — summaries, notes, flashcards, concept maps.
 
+**Visual focus requests** (for example, "explain the diagram at 6:39") resolve an available YouTube video format and extract the requested frame with FFmpeg. A bundled FFmpeg fallback is installed with the backend requirements, and YouTube stream resolution does not require a local Redis server.
+
 **Local video uploads** use `ffmpeg` to extract audio, then Groq Whisper (`whisper-large-v3-turbo`) transcribes it. Same Groq LLM pipeline handles the synthesis from there. Gemini is used as a secondary fallback for uploads if Groq is unavailable.
 
 **Caching** is handled by Upstash Redis. Any video processed once is cached for 24 hours — the second time someone requests the same video and prompt, the response is instant with zero API calls.
@@ -52,8 +54,7 @@ This repository includes a dedicated blind A/B testing module designed for acade
 | Frontend            | React + Vite, Framer Motion, Lucide Icons, Vanilla CSS      |
 | Backend             | FastAPI (Python)                                            |
 | Primary LLM         | Groq — `llama-3.3-70b-versatile` + `whisper-large-v3-turbo` |
-| Vision LLM          | Groq — `llama-3.2-11b-vision-preview`                       |
-| Multimodal Fallback | Google Gemini 2.0 Flash                                     |
+| Vision LLM          | Google Gemini 3.5 Flash-Lite (primary), Groq Qwen fallback  |
 | Auth + Database     | Supabase (Magic Link + Postgres)                            |
 | Cache + Rate Limit  | Upstash Redis                                               |
 

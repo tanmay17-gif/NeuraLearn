@@ -2,11 +2,14 @@ from fastapi import APIRouter, HTTPException, UploadFile, File, Form, Depends, S
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, field_validator
 from typing import List, Optional, Dict, Any, Literal
+import base64
 import shutil
 import os
 import uuid
 import hashlib
 import json
+import re
+import logging
 from services.transcription import get_transcript
 from services import engine
 from services.memory import save_to_memory, search_memory
@@ -17,62 +20,161 @@ from services import graph as graph_service
 
 api_router = APIRouter()
 security = HTTPBearer(auto_error=False)
+logger = logging.getLogger(__name__)
 
-async def inject_frame_explanations(video_id_or_url: str, dynamic_extra: str, is_youtube: bool, user_id: str) -> str:
-    """Scans dynamic_extra for timestamps, extracts frames, explains them, and appends to the prompt."""
+VISUAL_FOCUS_PATTERN = re.compile(
+    r"\b(?:diagrams?|images?|pictures?|charts?|graphs?|flow[\s-]?charts?|"
+    r"illustrations?|screenshots?|slides?|figures?|visuals?|on[\s-]screen|"
+    r"(?:explain|describe|summari[sz]e|tell me about)\s+(?:this|it))\b",
+    re.IGNORECASE,
+)
+FOCUS_TIMESTAMP_PATTERN = re.compile(
+    r"(?<![\w:])(?P<dot_minutes>\d{1,2})\.(?P<dot_seconds>[0-5]\d)"
+    r"\s*min(?:ute)?s?\b"
+    r"|(?<![\w:])(?P<clock>\d{1,2}:\d{2}:\d{2}|\d{1,2}:\d{2})(?!\d)"
+    r"|\b(?:at|timestamp(?:\s+at)?|around|near)\s+"
+    r"(?P<seconds>\d+(?:\.\d+)?)\s*(?:seconds?|secs?|s)?\b(?!:)"
+    r"|\b(?P<unit_seconds>\d+(?:\.\d+)?)\s*(?:seconds?|secs?)\b(?!:)",
+    re.IGNORECASE,
+)
+
+
+def _extract_focus_timestamps(dynamic_extra: str) -> List[str]:
+    """Extract explicit timeline references without treating arbitrary numbers as times."""
+    timestamps = []
+    for match in FOCUS_TIMESTAMP_PATTERN.finditer(dynamic_extra):
+        groups = match.groupdict()
+        if groups.get("dot_minutes") is not None:
+            timestamp = f"{int(groups['dot_minutes']):02}:{groups['dot_seconds']}"
+        else:
+            timestamp = groups.get("clock") or groups.get("seconds") or groups.get("unit_seconds")
+        if timestamp and timestamp not in timestamps:
+            timestamps.append(timestamp)
+    return timestamps
+
+
+async def inject_frame_explanations(
+    video_id_or_url: str,
+    dynamic_extra: str,
+    is_youtube: bool,
+    user_id: str,
+    jwt: Optional[str] = None,
+) -> str:
+    """Adds timestamp-specific or representative visual context to the user's request."""
     if not dynamic_extra:
         return dynamic_extra
-        
-    import re
-    # Match HH:MM:SS, MM:SS, or seconds
-    matches = re.finditer(r"\b(\d{1,2}:\d{2}:\d{2}|\d{1,2}:\d{2}|\d+(?:\.\d+)?)\b", dynamic_extra)
-    timestamps = [m.group(1) for m in matches]
-    
-    if not timestamps:
+
+    timestamps = _extract_focus_timestamps(dynamic_extra)
+    if not timestamps and not VISUAL_FOCUS_PATTERN.search(dynamic_extra):
         return dynamic_extra
-        
-    print(f"Found timestamps in prompt: {timestamps}")
-    from services.frame_extraction import extract_frame_at_timestamp
-    from services.vision_client import explain_frame_with_vision
-    
+
     explanations = []
-    for ts in set(timestamps):
-        try:
-            stream_url = video_id_or_url
-            if is_youtube:
-                import redis
-                import asyncio
-                import urllib.parse
-                import hashlib
-                r = redis.Redis(host=os.getenv("REDIS_HOST", "localhost"), port=6379, db=0, decode_responses=True)
-                url_hash = hashlib.md5(video_id_or_url.encode()).hexdigest()
-                cache_key = f"ytdlp:resolved:{url_hash}"
-                stream_url = r.get(cache_key)
-                if not stream_url:
-                    cmd = ["yt-dlp", "-g", "-f", "bestvideo[height<=720]", f"https://www.youtube.com/watch?v={video_id_or_url}"]
-                    process = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-                    stdout, stderr = await process.communicate()
-                    if process.returncode != 0:
-                        raise Exception("yt-dlp failed")
-                    stream_url = stdout.decode("utf-8").strip()
-                    r.setex(cache_key, 3600, stream_url)
-            
-            frame_path = await extract_frame_at_timestamp(stream_url, ts, is_remote=is_youtube)
-            vision_res = await explain_frame_with_vision(frame_path, user_id, "Explain this frame clearly.")
-            
-            explanations.append(f"Visual details at timestamp {ts}:\n{vision_res['explanation']}")
-            
-            import os
+    failures = []
+    if timestamps:
+        print(f"Found timestamps in prompt: {timestamps}")
+        from services.frame_extraction import (
+            extract_frame_at_timestamp,
+            resolve_youtube_stream_url,
+        )
+        from services.vision_client import explain_frame_with_vision
+
+        stream_url = video_id_or_url
+        stream_headers = None
+        if is_youtube:
             try:
-                os.remove(frame_path)
-            except:
-                pass
-        except Exception as e:
-            print(f"Failed to auto-explain frame at {ts}: {e}")
-            
+                resolved_stream = await resolve_youtube_stream_url(video_id_or_url)
+                stream_url = resolved_stream.url
+                stream_headers = resolved_stream.http_headers
+            except Exception as error:
+                print(f"Failed to resolve YouTube stream for visual analysis: {error}")
+                raise HTTPException(
+                    status_code=502,
+                    detail=(
+                        "Could not access the YouTube video to inspect the requested "
+                        "timestamp. No visual summary was generated. Verify that the "
+                        "video is publicly accessible and try again."
+                    ),
+                ) from error
+
+        for timestamp in timestamps:
+            try:
+                frame_path = await extract_frame_at_timestamp(
+                    stream_url,
+                    timestamp,
+                    is_remote=is_youtube,
+                    http_headers=stream_headers,
+                )
+                try:
+                    vision_result = await explain_frame_with_vision(
+                        frame_path,
+                        user_id,
+                        "Explain the visible content, especially any diagram, chart, or text.",
+                        jwt=jwt,
+                    )
+                    explanations.append(
+                        f"Visual details at timestamp {timestamp} "
+                        f"(requested frame):\n{vision_result['explanation']}"
+                    )
+                finally:
+                    import shutil
+
+                    shutil.rmtree(os.path.dirname(frame_path), ignore_errors=True)
+            except Exception as error:
+                safe_error = re.sub(r"https?://\S+", "<remote-url>", str(error)).strip()
+                if not safe_error:
+                    safe_error = repr(error)
+                logger.exception(
+                    "Failed to extract or explain video frame at timestamp %s (%s): %s",
+                    timestamp,
+                    type(error).__name__,
+                    safe_error[:240],
+                )
+                failures.append(
+                    f"{timestamp}: {type(error).__name__}: {safe_error[:240]}"
+                )
+    else:
+        try:
+            visual_analysis = await engine.generate_visual_analysis(
+                transcript="",
+                video_url=video_id_or_url,
+                user_id=user_id,
+                dynamic_extra=dynamic_extra,
+                is_youtube=is_youtube,
+                max_frames=8,
+            )
+            if visual_analysis.startswith("Visual analysis unavailable:"):
+                raise RuntimeError("no representative frame could be analyzed")
+            explanations.append(
+                "Representative frames sampled across the video (not a specific "
+                f"timeline position):\n{visual_analysis}"
+            )
+        except Exception as error:
+            safe_error = re.sub(r"https?://\S+", "<remote-url>", str(error)).strip()
+            if not safe_error:
+                safe_error = repr(error)
+            logger.error(
+                "Failed to analyze representative video frames (%s): %s",
+                type(error).__name__,
+                safe_error[:240],
+            )
+            failures.append(
+                f"representative frames: {type(error).__name__}: {safe_error[:240]}"
+            )
+
+    if failures:
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                "Visual analysis could not be completed "
+                f"({'; '.join(failures)}). No visual summary was generated. "
+                "Check video access and configured vision-provider credentials, "
+                "then retry."
+            ),
+        )
+
     if explanations:
-        dynamic_extra += "\n\n### AUTOMATIC DIAGRAM EXPLANATIONS ###\n" + "\n\n".join(explanations)
-        
+        dynamic_extra += "\n\n### AUTOMATIC VISUAL ANALYSIS ###\n" + "\n\n".join(explanations)
+
     return dynamic_extra
 
 def get_current_user(credentials: HTTPAuthorizationCredentials = Security(security)) -> str:
@@ -92,17 +194,17 @@ def get_current_jwt(credentials: HTTPAuthorizationCredentials = Security(securit
 
 class VideoRequest(BaseModel):
     url: str
-    level: Optional[str] = "intermediate"
-    dynamic_extra: Optional[str] = ""
-    manual_transcript: Optional[str] = ""
+    level: Literal["beginner", "intermediate", "expert"] = "intermediate"
+    dynamic_extra: str = ""
+    manual_transcript: str = ""
     use_profile: bool = True
 
 class ModuleRequest(BaseModel):
     video_id: str
     transcript: str
     video_url: Optional[str] = None
-    level: Optional[str] = "intermediate"
-    dynamic_extra: Optional[str] = ""
+    level: Literal["beginner", "intermediate", "expert"] = "intermediate"
+    dynamic_extra: str = ""
     use_profile: bool = True
 
 class FeedbackRequest(BaseModel):
@@ -116,6 +218,7 @@ class ProcessingResponse(BaseModel):
     video_id: str
     title: str
     summary: List[str]
+    summary_format: Literal["bullets", "paragraphs", "table", "numbered steps"] = "bullets"
     transcript: str
     custom_insights: Optional[str] = None
 
@@ -153,14 +256,28 @@ async def upload_video(
         with open(file_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
             
-        dynamic_extra = await inject_frame_explanations(file_path, dynamic_extra, is_youtube=False, user_id=user_id)
+        dynamic_extra = await inject_frame_explanations(
+            file_path,
+            dynamic_extra,
+            is_youtube=False,
+            user_id=user_id,
+            jwt=jwt,
+        )
         if use_profile:
             from services.profile import get_master_prompt, get_profile
+            profile = get_profile(user_id, jwt=jwt)
             master_prompt = get_master_prompt(user_id, dynamic_extra, jwt=jwt)
-            prof_version = get_profile(user_id, jwt=jwt).get("profile_version", 1)
+            prof_version = profile.get("profile_version", 1)
+            preferred_format = profile.get("preferred_format", "bullets")
+            preferred_length = profile.get("preferred_length", "default")
         else:
-            master_prompt = "Summarize this video."
+            master_prompt = (
+                "Summarize this video.\n\n"
+                f"## DYNAMIC USER INTENT:\n{dynamic_extra}"
+            )
             prof_version = None
+            preferred_format = "bullets"
+            preferred_length = "default"
 
         import time
         start_t = time.time()
@@ -168,16 +285,27 @@ async def upload_video(
         try:
             from services.transcription import get_local_video_transcript
             transcript = await get_local_video_transcript(file_path)
-            
-            engine_result = await engine.generate_summary_with_prompt(transcript, master_prompt=master_prompt)
+        except Exception as e:
+            print(f"Local transcript extraction failed; trying multimodal upload fallback: {e}")
+            result = await engine.process_uploaded_video(
+                file_path,
+                master_prompt=master_prompt,
+                level=level,
+                preferred_format=preferred_format,
+                preferred_length=preferred_length,
+            )
+        else:
+            engine_result = await engine.generate_summary_with_prompt(
+                transcript,
+                master_prompt=master_prompt,
+                level=level,
+                preferred_format=preferred_format,
+                preferred_length=preferred_length,
+            )
             result = {
                 "transcript": transcript,
-                "summary": engine_result["summary"],
-                "custom_insights": engine_result["custom_insights"]
+                **engine_result,
             }
-        except Exception as e:
-            print(f"Fallback to legacy process_uploaded_video due to: {e}")
-            result = await engine.process_uploaded_video(file_path, master_prompt=master_prompt)
         
         latency = int((time.time() - start_t) * 1000)
         from services.supabase_client import supabase
@@ -190,7 +318,7 @@ async def upload_video(
                     "profile_version_used": prof_version,
                     "prompt_text": master_prompt,
                     "summary_output": " ".join(result["summary"]),
-                    "model_name": "gemini-2.0-flash / groq",
+                    "model_name": "gemini-3.8-flash / groq",
                     "latency_ms": latency,
                     "cache_hit": False
                 })
@@ -202,18 +330,22 @@ async def upload_video(
             title=f"Uploaded: {file.filename}",
             content=" ".join(result["summary"]),
             user_id=user_id,
-            profile_version_used=prof_version
+            profile_version_used=prof_version,
+            jwt=jwt,
         )
 
         return ProcessingResponse(
             video_id=f"upload_{safe_filename}",
             title=file.filename,
             summary=result["summary"],
+            summary_format=result["summary_format"],
             transcript=result["transcript"],
             custom_insights=result["custom_insights"]
         )
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail="Video processing failed.")
+        raise HTTPException(status_code=500, detail=f"Video processing failed: {str(e)[:250]}")
     finally:
         if file_path and os.path.exists(file_path):
             try:
@@ -231,8 +363,26 @@ async def process_video(
     if not await check_rate_limit(user_id, limit=10, window=60):
         raise HTTPException(status_code=429, detail="Rate limit exceeded. Please wait a minute.")
 
-    # CACHING
-    cache_key = f"process:{hashlib.md5((request.url + request.level + request.dynamic_extra + user_id + str(request.use_profile)).encode()).hexdigest()}"
+    profile = get_profile(user_id, jwt=jwt) if request.use_profile else {}
+    profile_version = profile.get("profile_version", 1) if request.use_profile else None
+    preferred_format = profile.get("preferred_format", "bullets")
+    preferred_length = profile.get("preferred_length", "default")
+    cache_fingerprint = json.dumps(
+        {
+            "url": request.url,
+            "manual_transcript": request.manual_transcript,
+            "level": request.level,
+            "dynamic_extra": request.dynamic_extra,
+            "user_id": user_id,
+            "use_profile": request.use_profile,
+            "profile_version": profile_version,
+            "preferred_format": preferred_format,
+            "preferred_length": preferred_length,
+            "visual_focus_pipeline": 2,
+        },
+        sort_keys=True,
+    )
+    cache_key = f"process:{hashlib.sha256(cache_fingerprint.encode()).hexdigest()}"
     cached = await get_cached_synthesis(cache_key)
     if cached:
         from services.supabase_client import supabase
@@ -264,13 +414,22 @@ async def process_video(
         else:
             transcript_data = await get_transcript(request.url)
         
-        request.dynamic_extra = await inject_frame_explanations(request.url, request.dynamic_extra, is_youtube=True, user_id=user_id)
+        request.dynamic_extra = await inject_frame_explanations(
+            request.url,
+            request.dynamic_extra,
+            is_youtube=True,
+            user_id=user_id,
+            jwt=jwt,
+        )
         if request.use_profile:
-            from services.profile import get_master_prompt, get_profile
+            from services.profile import get_master_prompt
             master_prompt = get_master_prompt(user_id, request.dynamic_extra, jwt=jwt)
-            prof_version = get_profile(user_id, jwt=jwt).get("profile_version", 1)
+            prof_version = profile_version
         else:
-            master_prompt = "Summarize this video."
+            master_prompt = (
+                "Summarize this video.\n\n"
+                f"## DYNAMIC USER INTENT:\n{request.dynamic_extra}"
+            )
             prof_version = None
 
         import time
@@ -278,7 +437,10 @@ async def process_video(
 
         engine_result = await engine.generate_summary_with_prompt(
             transcript_data["text"], 
-            master_prompt=master_prompt
+            master_prompt=master_prompt,
+            level=request.level,
+            preferred_format=preferred_format,
+            preferred_length=preferred_length,
         )
         latency = int((time.time() - start_t) * 1000)
         
@@ -295,7 +457,7 @@ async def process_video(
                     "profile_version_used": prof_version,
                     "prompt_text": master_prompt,
                     "summary_output": " ".join(summary),
-                    "model_name": "gemini-2.0-flash / groq",
+                    "model_name": "gemini-3.8-flash / groq",
                     "latency_ms": latency,
                     "cache_hit": False
                 })
@@ -311,13 +473,15 @@ async def process_video(
             title=transcript_data["title"],
             content=content_to_save,
             user_id=user_id,
-            profile_version_used=prof_version
+            profile_version_used=prof_version,
+            jwt=jwt,
         )
 
         response_data = {
             "video_id": transcript_data["video_id"],
             "title": transcript_data["title"],
             "summary": summary,
+            "summary_format": engine_result["summary_format"],
             "transcript": transcript_data["text"],
             "custom_insights": custom_insights
         }
@@ -325,9 +489,12 @@ async def process_video(
         await set_cached_synthesis(cache_key, response_data)
         return ProcessingResponse(**response_data)
 
+    except HTTPException:
+        raise
     except Exception as e:
         err = str(e)
-        if "blocking" in err.lower() or "bot" in err.lower() or "429" in err:
+        err_lower = err.lower()
+        if "youtube is blocking" in err_lower or "blocking automated requests" in err_lower:
             raise HTTPException(status_code=503, detail="YouTube is blocking automated requests from this server. Please paste the video transcript manually using the 'Manual Transcript' option.")
         raise HTTPException(status_code=500, detail=f"Failed to process video: {err[:200]}")
 
@@ -344,7 +511,26 @@ async def generate_module(
     if module not in VALID_MODULES:
         raise HTTPException(status_code=400, detail="Invalid module.")
 
-    cache_key = f"module:{module}:{hashlib.md5((request.video_id + request.level + user_id).encode()).hexdigest()}"
+    profile_version = (
+        get_profile(user_id, jwt=jwt).get("profile_version", 1)
+        if request.use_profile
+        else None
+    )
+    module_fingerprint = json.dumps(
+        {
+            "module": module,
+            "video_id": request.video_id,
+            "transcript": request.transcript,
+            "video_url": request.video_url,
+            "level": request.level,
+            "dynamic_extra": request.dynamic_extra,
+            "user_id": user_id,
+            "use_profile": request.use_profile,
+            "profile_version": profile_version,
+        },
+        sort_keys=True,
+    )
+    cache_key = f"module:{hashlib.sha256(module_fingerprint.encode()).hexdigest()}"
     cached = await get_cached_synthesis(cache_key)
     if cached:
         return {"data": cached}
@@ -352,7 +538,14 @@ async def generate_module(
     try:
         data = None
         if module == "notes":
-            data = await engine.generate_notes(request.transcript, level=request.level, user_id=user_id)
+            data = await engine.generate_notes(
+                request.transcript,
+                level=request.level,
+                user_id=user_id,
+                dynamic_extra=request.dynamic_extra,
+                use_profile=request.use_profile,
+                jwt=jwt,
+            )
 
         elif module == "visuals":
             if not request.video_url:
@@ -398,7 +591,13 @@ async def save_feedback(
     user_id: str = Depends(get_current_user),
     jwt: Optional[str] = Depends(get_current_jwt)
 ):
-    update_preference(user_id, request.level, request.rating, jwt=jwt)
+    update_preference(
+        user_id,
+        request.level,
+        request.rating,
+        jwt=jwt,
+        custom_feedback=request.custom_feedback or "",
+    )
     return {"status": "success"}
 
 
@@ -566,7 +765,8 @@ class FrameExplainRequest(BaseModel):
 @api_router.post("/api/explain-frame")
 async def explain_frame(
     request: FrameExplainRequest, 
-    user_id: str = Depends(get_current_user)
+    user_id: str = Depends(get_current_user),
+    jwt: Optional[str] = Depends(get_current_jwt),
 ):
     # RATE LIMITING (independent)
     if not await check_rate_limit(user_id, limit=10, window=60, prefix="explain_frame:"):
@@ -578,42 +778,25 @@ async def explain_frame(
 
     try:
         if request.is_youtube:
-            # Resolve stream URL
-            import redis
-            import asyncio
-            r = redis.Redis(host=os.getenv("REDIS_HOST", "localhost"), port=6379, db=0, decode_responses=True)
-            url_hash = hashlib.md5(request.video_id.encode()).hexdigest()
-            cache_key = f"ytdlp:resolved:{url_hash}"
-            
-            stream_url = r.get(cache_key)
-            if not stream_url:
-                cmd = ["yt-dlp", "-g", "-f", "bestvideo[height<=720]", f"https://www.youtube.com/watch?v={request.video_id}"]
-                process = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-                stdout, stderr = await process.communicate()
-                if process.returncode != 0:
-                    raise Exception(f"Failed to resolve YouTube URL: {stderr.decode('utf-8', 'replace')}")
-                stream_url = stdout.decode("utf-8").strip()
-                
-                # Try parsing expire from URL to cache
-                try:
-                    parsed_url = urllib.parse.urlparse(stream_url)
-                    query_params = urllib.parse.parse_qs(parsed_url.query)
-                    expire = int(query_params.get("expire", [0])[0])
-                    import time
-                    now = int(time.time())
-                    ttl = max(0, expire - now - 300)
-                    if ttl > 0:
-                        r.setex(cache_key, ttl, stream_url)
-                except Exception:
-                    r.setex(cache_key, 3600, stream_url) # Fallback TTL
+            from services.frame_extraction import resolve_youtube_stream_url
+
+            resolved_stream = await resolve_youtube_stream_url(request.video_id)
+            stream_url = resolved_stream.url
+            stream_headers = resolved_stream.http_headers
         else:
             # Local file upload check
             if not os.path.exists(request.video_id):
                 raise HTTPException(status_code=404, detail="Local video file not found.")
             stream_url = request.video_id
+            stream_headers = None
 
         # Extract frame
-        frame_path = await extract_frame_at_timestamp(stream_url, request.timestamp, is_remote=request.is_youtube)
+        frame_path = await extract_frame_at_timestamp(
+            stream_url,
+            request.timestamp,
+            is_remote=request.is_youtube,
+            http_headers=stream_headers,
+        )
 
         # Upload frame to Supabase storage if possible
         frame_url = None
@@ -630,9 +813,13 @@ async def explain_frame(
                 frame_url = f"data:image/jpeg;base64,{frame_b64}"
 
         # Get Explanation
-        from services.profile import get_profile
         dynamic_extra = "Explain this frame clearly."
-        vision_res = await explain_frame_with_vision(frame_path, user_id, dynamic_extra)
+        vision_res = await explain_frame_with_vision(
+            frame_path,
+            user_id,
+            dynamic_extra,
+            jwt=jwt,
+        )
         
         # Cleanup
         try:
@@ -647,5 +834,7 @@ async def explain_frame(
             "provider_used": vision_res["provider"]
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

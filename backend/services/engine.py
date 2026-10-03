@@ -1,12 +1,12 @@
+import asyncio
 import os
 import json
 import cv2
 import base64
-import yt_dlp
 import google.genai as genai
 from google.genai import types
 from groq import Groq
-from typing import List, Dict, Any, Optional
+from typing import Callable, List, Dict, Any, Optional
 from dotenv import load_dotenv
 from services.profile import get_system_instructions
 
@@ -19,14 +19,260 @@ GROQ_KEY = os.getenv("GROQ_API_KEY")
 gemini_client = genai.Client(api_key=GEMINI_KEY) if GEMINI_KEY else None
 groq_client = Groq(api_key=GROQ_KEY) if GROQ_KEY and "your_groq" not in GROQ_KEY else None
 
-async def extract_frames(video_url: str, max_frames: int = 3) -> List[str]:
-    """Extracts low-res frames for multimodal analysis."""
-    ydl_opts = {'format': 'best[height<=360]', 'quiet': True, 'no_warnings': True}
+SUMMARY_INPUT_CHAR_LIMIT = 10000
+SUMMARY_MAX_REDUCTION_PASSES = 8
+SUMMARY_CHUNK_CONCURRENCY = 3
+
+LEVEL_INSTRUCTIONS = {
+    "beginner": "Explain the topic for a beginner. Define specialized terms briefly and use plain language without omitting important ideas.",
+    "intermediate": "Give an advanced synthesis for a learner with basic familiarity. Explain important mechanisms and trade-offs, defining specialized terms when useful.",
+    "expert": "Give an expert-level synthesis with precise terminology and nuanced technical detail, while staying strictly within the source.",
+}
+SUMMARY_DETAIL_DELIMITER = "===DETAILED_EXPLANATION==="
+SUMMARY_CUSTOM_DELIMITER = "===CUSTOM_INSIGHTS==="
+SUMMARY_FORMATS = {"bullets", "paragraphs", "table", "numbered steps"}
+VISUAL_ANALYSIS_START = "### AUTOMATIC VISUAL ANALYSIS ###"
+
+
+def _normalize_summary_format(preferred_format: str) -> str:
+    if not isinstance(preferred_format, str):
+        return "bullets"
+    normalized = preferred_format.strip().lower()
+    if normalized in {"paragraph", "prose"}:
+        normalized = "paragraphs"
+    if normalized in {"numbered", "numbered list", "numbered steps"}:
+        normalized = "numbered steps"
+    return normalized if normalized in SUMMARY_FORMATS else "bullets"
+
+
+def _summary_format_instructions(preferred_format: str, preferred_length: str) -> str:
+    format_instructions = {
+        "bullets": (
+            "Write exactly 5 concise, informative bullet points covering the source's main ideas. "
+            "Use bolding for key technical concepts."
+        ),
+        "paragraphs": (
+            "Write SECTION 1 as one concise brief-summary paragraph. Then write the exact delimiter "
+            f"{SUMMARY_DETAIL_DELIMITER} on its own line, followed by SECTION 2 as a thorough "
+            "detailed explanation in short prose paragraphs. Do not use bullets, numbered lists, "
+            "or tables in either section."
+        ),
+        "table": (
+            "Write the core summary as one compact Markdown table with columns for topic and "
+            "source-supported explanation. Do not add facts absent from the source."
+        ),
+        "numbered steps": (
+            "Write the core summary as a concise numbered list. Number items only when the source "
+            "presents an order or sequence; otherwise use numbered summary points."
+        ),
+    }[preferred_format]
+    normalized_length = (
+        preferred_length.strip().lower()
+        if isinstance(preferred_length, str)
+        else "default"
+    )
+    length_instructions = {
+        "shorter": "Keep the entire summary brief and prioritize only the most important source points.",
+        "detailed": "Include thorough detail for all important source points without adding outside material.",
+        "detailed and concise": (
+            "Give a concise overview first, then retain the important detail in the explanation; "
+            "remove repetition and filler."
+        ),
+    }.get(normalized_length, "Use the depth requested by the persona and selected level.")
+    return f"FORMAT REQUIREMENT: {format_instructions}\nLENGTH REQUIREMENT: {length_instructions}"
+
+
+def _extract_visual_evidence(master_prompt: str) -> str:
+    """Extract successful frame analysis so the model can use it as source material."""
+    _, marker, remaining = master_prompt.partition(VISUAL_ANALYSIS_START)
+    if not marker:
+        return ""
+
+    section_end = len(remaining)
+    for boundary in ("\n\n### VISUAL ANALYSIS LIMITATION ###", "\n## OPERATING PROTOCOLS:"):
+        boundary_index = remaining.find(boundary)
+        if boundary_index >= 0:
+            section_end = min(section_end, boundary_index)
+    return remaining[:section_end].strip()
+
+
+def _parse_summary_output(content: str, preferred_format: str) -> Dict[str, Any]:
+    """Parse the structured model output while preserving the requested presentation."""
+    import re
+
+    summary_format = _normalize_summary_format(preferred_format)
+    summary_text, separator, custom_text = content.partition(SUMMARY_CUSTOM_DELIMITER)
+    custom_insights = custom_text.strip() if separator else ""
+
+    if summary_format == "paragraphs":
+        brief, detail_separator, detailed = summary_text.partition(SUMMARY_DETAIL_DELIMITER)
+        if not detail_separator or not brief.strip() or not detailed.strip():
+            raise RuntimeError("The model did not return both requested summary paragraphs.")
+        summary = [brief.strip(), detailed.strip()]
+    elif summary_format == "bullets":
+        bullets = []
+        for line in summary_text.splitlines():
+            match = re.match(r"^\s*[-*]\s+(.+?)\s*$", line)
+            if match and len(match.group(1).strip()) > 10:
+                bullets.append(match.group(1).strip())
+        if len(bullets) != 5:
+            raise RuntimeError(
+                f"The model returned {len(bullets)} summary bullets instead of 5."
+            )
+        summary = bullets
+    else:
+        if not summary_text.strip():
+            raise RuntimeError("The model returned an empty video summary.")
+        summary = [summary_text.strip()]
+
+    return {
+        "summary": summary,
+        "summary_format": summary_format,
+        "custom_insights": custom_insights or None,
+    }
+
+
+def _split_transcript(transcript: str, max_chars: int = SUMMARY_INPUT_CHAR_LIMIT) -> List[str]:
+    """Split transcript text into bounded chunks without dropping source characters."""
+    chunks = []
+    start = 0
+    while start < len(transcript):
+        end = min(start + max_chars, len(transcript))
+        if end < len(transcript):
+            boundary_start = start + max_chars // 2
+            boundary = max(
+                transcript.rfind("\n", boundary_start, end),
+                transcript.rfind(". ", boundary_start, end),
+                transcript.rfind("? ", boundary_start, end),
+                transcript.rfind("! ", boundary_start, end),
+                transcript.rfind(" ", boundary_start, end),
+            )
+            if boundary >= boundary_start:
+                end = boundary + 1
+        chunks.append(transcript[start:end])
+        start = end
+    return chunks
+
+
+def _summarize_transcript_chunk(transcript_chunk: str) -> str:
+    prompt = f"""
+    Create faithful, concise notes from the source material below. It may be a
+    video transcript excerpt or notes from an earlier reduction pass. Preserve
+    every distinct topic, claim, explanation, example, name, qualification, and
+    conclusion. Keep the source order. Do not add outside facts, speculation,
+    recommendations, or conclusions. These notes will be combined with other
+    parts of the same video, so do not add an introduction or standalone ending.
+    Keep the notes under 700 words.
+
+    SOURCE MATERIAL:
+    {transcript_chunk}
+    """
+    completion = groq_client.chat.completions.create(
+        messages=[{"role": "user", "content": prompt}],
+        model="openai/gpt-oss-120b",
+    )
+    return completion.choices[0].message.content.strip()
+
+
+def _summarize_study_notes_chunk(source_chunk: str) -> str:
+    prompt = f"""
+    Produce detailed, faithful study notes from this source material. It may be
+    a video transcript excerpt or notes from an earlier reduction pass. Capture
+    each distinct subject, definition, mechanism, example, named entity, claim,
+    qualification, and conclusion in this part. Preserve the order. Do not add
+    outside knowledge, invented examples, recommendations, or implications.
+    Do not repeat an introduction or conclusion for the whole video. Keep these
+    notes under 700 words.
+
+    SOURCE MATERIAL:
+    {source_chunk}
+    """
+    completion = groq_client.chat.completions.create(
+        messages=[{"role": "user", "content": prompt}],
+        model="openai/gpt-oss-120b",
+    )
+    return completion.choices[0].message.content.strip()
+
+
+async def _map_reduce_transcript(
+    transcript: str,
+    summarize_chunk: Callable[[str], str],
+) -> str:
+    """Build bounded context from the whole transcript without truncating it."""
+    if not transcript.strip():
+        raise ValueError("The video transcript is empty.")
+
+    semaphore = asyncio.Semaphore(SUMMARY_CHUNK_CONCURRENCY)
+
+    async def summarize(chunk: str) -> str:
+        async with semaphore:
+            note = await asyncio.to_thread(summarize_chunk, chunk)
+        if not note:
+            raise RuntimeError("The model returned empty notes for a transcript section.")
+        return note
+
+    chunks = _split_transcript(transcript)
+    notes = await asyncio.gather(*(summarize(chunk) for chunk in chunks))
+    combined = "\n\n".join(notes)
+    reduction_passes = 0
+
+    while len(combined) > SUMMARY_INPUT_CHAR_LIMIT:
+        if reduction_passes >= SUMMARY_MAX_REDUCTION_PASSES:
+            raise RuntimeError("Could not condense the full transcript within the model context limit.")
+        reduced_notes = await asyncio.gather(
+            *(summarize(chunk) for chunk in _split_transcript(combined))
+        )
+        reduced = "\n\n".join(reduced_notes)
+        if len(reduced) >= len(combined):
+            raise RuntimeError("Could not condense the full transcript within the model context limit.")
+        combined = reduced
+        reduction_passes += 1
+
+    return combined
+
+
+async def extract_frames(
+    video_url: str,
+    max_frames: int = 3,
+    is_youtube: bool = True,
+) -> List[str]:
+    """Extracts evenly spaced, low-resolution frames for multimodal analysis."""
     frames_b64 = []
+    cap = None
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(video_url, download=False)
-            stream_url = info['url']
+        if is_youtube:
+            from services.frame_extraction import (
+                extract_frame_at_timestamp,
+                resolve_youtube_stream_url,
+            )
+
+            resolved_stream = await resolve_youtube_stream_url(video_url)
+            if not resolved_stream.duration or resolved_stream.duration <= 0:
+                print("[METRIC] Extraction: Failed (Video duration unavailable)")
+                return []
+
+            for index in range(1, max_frames + 1):
+                timestamp = resolved_stream.duration * index / (max_frames + 1)
+                frame_path = await extract_frame_at_timestamp(
+                    resolved_stream.url,
+                    f"{timestamp:.3f}",
+                    is_remote=True,
+                    http_headers=resolved_stream.http_headers,
+                )
+                try:
+                    with open(frame_path, "rb") as frame_file:
+                        frames_b64.append(
+                            base64.b64encode(frame_file.read()).decode("utf-8")
+                        )
+                finally:
+                    import shutil
+
+                    shutil.rmtree(os.path.dirname(frame_path), ignore_errors=True)
+            print(f"[METRIC] Extraction: Success ({len(frames_b64)} Frames)")
+            return frames_b64
+        else:
+            stream_url = video_url
+
         cap = cv2.VideoCapture(stream_url)
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         if total_frames > 0:
@@ -39,77 +285,110 @@ async def extract_frames(video_url: str, max_frames: int = 3) -> List[str]:
                 frame = cv2.resize(frame, (400, 225)) # Even smaller for Groq Vision speed
                 _, buffer = cv2.imencode('.jpg', frame)
                 frames_b64.append(base64.b64encode(buffer).decode('utf-8'))
-        cap.release()
-        print("[METRIC] Extraction: Success (Frames)")
+        if frames_b64:
+            print(f"[METRIC] Extraction: Success ({len(frames_b64)} Frames)")
+        else:
+            print("[METRIC] Extraction: Failed (No video frames available)")
     except Exception as e:
         print(f"[METRIC] Extraction: Failed (Frames) - {e}")
-        pass
+    finally:
+        if cap is not None:
+            cap.release()
     return frames_b64
 
-async def generate_summary_with_prompt(transcript: str, master_prompt: str) -> Dict[str, Any]:
+async def generate_summary_with_prompt(
+    transcript: str,
+    master_prompt: str,
+    level: str = "intermediate",
+    preferred_format: str = "bullets",
+    preferred_length: str = "default",
+) -> Dict[str, Any]:
     """Generates an outstanding executive summary and handles custom user intent separately."""
-    if not groq_client: return {"summary": ["Groq client not configured."], "custom_insights": None}
-    
-    prompt = f"""
-    {master_prompt}
-    
-    TASK: Analyze the following transcript and provide two distinct sections.
-    IMPORTANT: BOTH SECTIONS MUST STRICTLY ADHERE TO THE CORE PERSONA BLUEPRINT DEFINED ABOVE. Do not deviate from the academic tone and depth requested.
-    
-    SECTION 1: CORE SUMMARY
-    - Provide exactly 5 high-impact, elite-level bullet points.
-    - Focus on the fundamental 'why' and 'how'.
-    - Use bolding (e.g., **Term**) for key technical concepts.
-    - Each bullet must be a substantial observation.
-    
-    SECTION 2: DYNAMIC CUSTOM SYNTHESIS
-    - Address the instructions in the "DYNAMIC USER INTENT" section above.
-    - IMPORTANT: Maintain the Persona Blueprint tone. Do not provide generic answers.
-    - Use high-quality Markdown (headers, lists, or paragraphs as appropriate).
-    - If no specific intent was provided, provide a 'Strategic Outlook' on the topic.
-    
-    DELIMITER: You MUST separate the two sections with the exact string: ===CUSTOM_INSIGHTS===
-    
-    NOTE: DO NOT output labels like "SECTION 1", "SECTION 2", or "CORE SUMMARY" in your response. Start directly with the content.
-    
-    TRANSCRIPT:
-    {transcript[:10000]}
-    """
+    if not groq_client:
+        raise RuntimeError("Groq is not configured; cannot generate a video summary.")
 
     try:
-        completion = groq_client.chat.completions.create(
+        if not transcript.strip():
+            raise ValueError("The video transcript is empty.")
+        visual_evidence = _extract_visual_evidence(master_prompt)
+        complete_source = transcript
+        if visual_evidence:
+            complete_source += (
+                "\n\nVISUAL EVIDENCE FROM VIDEO FRAMES:\n"
+                f"{visual_evidence}"
+            )
+
+        if len(complete_source) > SUMMARY_INPUT_CHAR_LIMIT:
+            source_material = await _map_reduce_transcript(
+                complete_source,
+                _summarize_transcript_chunk,
+            )
+            source_label = "COMPREHENSIVE NOTES FROM THE VIDEO TRANSCRIPT AND VISUAL ANALYSIS"
+        else:
+            source_material = complete_source
+            source_label = (
+                "TRANSCRIPT AND VISUAL FRAME ANALYSIS"
+                if visual_evidence
+                else "TRANSCRIPT"
+            )
+
+        selected_level = level.lower()
+        summary_format = _normalize_summary_format(preferred_format)
+        level_instruction = LEVEL_INSTRUCTIONS.get(
+            selected_level,
+            LEVEL_INSTRUCTIONS["intermediate"],
+        )
+        prompt = f"""
+    {master_prompt}
+    
+    TASK: Summarize the provided source material and provide two distinct sections.
+    Treat it as the sole authority for claims about the video. Do not add outside
+    facts, future predictions, invented examples, recommendations, or conclusions.
+    If a point is unclear or absent, do not guess. Follow the selected level and
+    the persona's tone, vocabulary, depth, length, and formatting preferences.
+
+    SELECTED LEVEL ({selected_level}):
+    {level_instruction}
+    
+    SECTION 1: CORE SUMMARY
+    {_summary_format_instructions(summary_format, preferred_length)}
+    
+    SECTION 2: DYNAMIC CUSTOM SYNTHESIS
+    - Address only explicit instructions in the DYNAMIC USER INTENT above.
+    - Clearly distinguish requested analysis from claims made by the video.
+    - If the intent includes AUTOMATIC VISUAL ANALYSIS, use it as evidence only for
+      visual details; do not guess details that are unclear or unavailable.
+    - If there is no explicit request, leave this section empty.
+    
+    DELIMITER: You MUST separate the core summary and dynamic synthesis with the exact
+    string: {SUMMARY_CUSTOM_DELIMITER}
+    
+    NOTE: Do not output section labels. Do not add a strategic outlook unless requested.
+    
+    {source_label}:
+    {source_material}
+        """
+
+        completion = await asyncio.to_thread(
+            groq_client.chat.completions.create,
             messages=[{"role": "user", "content": prompt}],
             model="openai/gpt-oss-120b",
         )
         content = completion.choices[0].message.content
+        if not content or not content.strip():
+            raise RuntimeError("The model returned an empty video summary.")
         
-        parts = content.split('===CUSTOM_INSIGHTS===')
-        summary_text = parts[0].strip()
-        custom_insights = parts[1].strip() if len(parts) > 1 else None
-        
-        # Parse bullets for Section 1
-        import re
-        lines = summary_text.split('\n')
-        bullets = []
-        for line in lines:
-            line = line.strip()
-            match = re.match(r'^[-*\d.]+\s*(.*)', line)
-            if match:
-                bullet_text = match.group(1).strip()
-                if len(bullet_text) > 10:
-                    bullets.append(bullet_text)
-        
-        if not bullets:
-            bullets = [l.strip() for l in lines if len(l.strip()) > 20][:5]
-            
-        return {
-            "summary": bullets[:5],
-            "custom_insights": custom_insights
-        }
+        return _parse_summary_output(content, summary_format)
     except Exception as e:
-        return {"summary": [f"Error: {str(e)}"], "custom_insights": None}
+        raise RuntimeError(f"Video summary generation failed: {e}") from e
 
-async def process_uploaded_video(file_path: str, master_prompt: str) -> Dict[str, Any]:
+async def process_uploaded_video(
+    file_path: str,
+    master_prompt: str,
+    level: str = "intermediate",
+    preferred_format: str = "bullets",
+    preferred_length: str = "default",
+) -> Dict[str, Any]:
     """
     Processes a locally uploaded video.
     PRIMARY: Extracts audio and uses Groq Whisper for transcription + Groq LLM for summary.
@@ -149,12 +428,17 @@ async def process_uploaded_video(file_path: str, master_prompt: str) -> Dict[str
             print("[METRIC] Extraction: Success (Audio)")
 
             # Generate summary using existing Groq text pipeline
-            engine_result = await generate_summary_with_prompt(transcript_text, master_prompt=master_prompt)
+            engine_result = await generate_summary_with_prompt(
+                transcript_text,
+                master_prompt=master_prompt,
+                level=level,
+                preferred_format=preferred_format,
+                preferred_length=preferred_length,
+            )
 
             return {
                 "transcript": transcript_text,
-                "summary": engine_result["summary"],
-                "custom_insights": engine_result["custom_insights"]
+                **engine_result,
             }
 
         except FileNotFoundError:
@@ -189,48 +473,62 @@ async def process_uploaded_video(file_path: str, master_prompt: str) -> Dict[str
         if file.state.name == "FAILED":
             raise Exception("Gemini video processing failed.")
 
+        summary_format = _normalize_summary_format(preferred_format)
         prompt = f"""
         {master_prompt}
-        
-        TASK: Perform a deep multimodal analysis of this video.
-        
+
+        SELECTED LEVEL ({level}):
+        {LEVEL_INSTRUCTIONS.get(level.lower(), LEVEL_INSTRUCTIONS["intermediate"])}
+
+        TASK: Transcribe and summarize the complete video.
+        Use only information present in the video. Do not add outside facts,
+        future predictions, invented examples, or recommendations. Follow the
+        selected level and persona when explaining the video's own material.
+
         OUTPUT STRUCTURE:
-        1. TRANSCRIPT: Provide a highly accurate transcription of the audio (or describe visuals if no audio).
-        2. CORE SUMMARY: Provide exactly 5 high-impact bullet points.
-        3. CUSTOM SYNTHESIS: Address any instructions in the "DYNAMIC USER INTENT" section above.
+        1. TRANSCRIPT: Transcribe the audio as completely as possible (or describe visuals if there is no audio).
+        2. CORE SUMMARY: Follow this required format and length:
+        {_summary_format_instructions(summary_format, preferred_length)}
+        3. CUSTOM SYNTHESIS: Address only explicit instructions in DYNAMIC USER INTENT; otherwise leave empty.
         
         DELIMITERS: 
         - Start the transcript section with ===TRANSCRIPT_START===
         - Start the summary section with ===SUMMARY_START===
+        - For paragraph format, separate the brief and detailed sections with
+          {SUMMARY_DETAIL_DELIMITER}
         - Start the custom synthesis with ===CUSTOM_START===
         
         Maintain the Persona Blueprint tone throughout.
         """
 
         response = gemini_client.models.generate_content(
-            model='gemini-2.0-flash',
+            model='gemini-3.8-flash',
             contents=[file, prompt]
         )
 
         text = response.text
-        transcript = text.split("===TRANSCRIPT_START===")[-1].split("===SUMMARY_START===")[0].strip()
-        summary_raw = text.split("===SUMMARY_START===")[-1].split("===CUSTOM_START===")[0].strip()
-        custom_insights = text.split("===CUSTOM_START===")[-1].strip()
+        if not text:
+            raise RuntimeError("Gemini returned an empty video analysis.")
+        required_delimiters = (
+            "===TRANSCRIPT_START===",
+            "===SUMMARY_START===",
+            "===CUSTOM_START===",
+        )
+        if not text or any(delimiter not in text for delimiter in required_delimiters):
+            raise RuntimeError("Gemini returned an incomplete video analysis.")
+        transcript = text.split("===TRANSCRIPT_START===", 1)[1].split("===SUMMARY_START===", 1)[0].strip()
+        summary_raw = text.split("===SUMMARY_START===", 1)[1].split("===CUSTOM_START===", 1)[0].strip()
+        custom_insights = text.split("===CUSTOM_START===", 1)[1].strip() or None
 
-        import re
-        bullets = []
-        for line in summary_raw.split('\n'):
-            line = line.strip()
-            match = re.match(r'^[-*\d.]+\s*(.*)', line)
-            if match:
-                bullet_text = match.group(1).strip()
-                if len(bullet_text) > 10:
-                    bullets.append(bullet_text)
+        if not transcript:
+            raise RuntimeError("Gemini returned an empty video transcript.")
 
         return {
             "transcript": transcript,
-            "summary": bullets[:5],
-            "custom_insights": custom_insights
+            **_parse_summary_output(
+                f"{summary_raw}{SUMMARY_CUSTOM_DELIMITER}{custom_insights or ''}",
+                summary_format,
+            ),
         }
     except Exception as e:
         err_str = str(e)
@@ -247,113 +545,174 @@ async def generate_summary(transcript: str, level: str = "intermediate", user_id
     # Fallback/Helper that uses the new engine
     from services.profile import get_master_prompt
     master_prompt = get_master_prompt(user_id)
-    return await generate_summary_with_prompt(transcript, master_prompt)
+    result = await generate_summary_with_prompt(transcript, master_prompt, level=level)
+    return result["summary"]
 
-async def generate_notes(transcript: str, level: str = "intermediate", user_id: str = "default_user") -> str:
-    """Generates research-grade structured notes using the Master Prompt."""
-    if not groq_client: return "Groq client not configured."
-    
-    from services.profile import get_master_prompt
-    master_prompt = get_master_prompt(user_id)
+async def generate_notes(
+    transcript: str,
+    level: str = "intermediate",
+    user_id: str = "default_user",
+    dynamic_extra: str = "",
+    use_profile: bool = True,
+    jwt: Optional[str] = None,
+) -> str:
+    """Generate source-grounded study notes covering the complete transcript."""
+    if not groq_client:
+        raise RuntimeError("Groq is not configured; cannot generate study notes.")
 
-    prompt = f"""
-    {master_prompt}
-    
-    TASK: Create a 'Scientific Synthesis' of the following transcript in high-quality Markdown.
-    Use a professional, editorial tone consistent with the Persona Blueprint.
-    
-    Include:
-    - # Abstract (Brief overview)
-    - ## Core Architecture/Concepts (Deep dive)
-    - ## Implementation Details (If applicable)
-    - ## Critical Analysis (Pros/Cons or Trade-offs)
-    
-    TRANSCRIPT:
-    {transcript[:15000]}
-    """
     try:
-        completion = groq_client.chat.completions.create(
+        from services.profile import get_master_prompt
+
+        master_prompt = (
+            get_master_prompt(user_id, dynamic_extra, jwt=jwt)
+            if use_profile
+            else "No user persona is active. Follow the selected learning level."
+        )
+        selected_level = level.lower()
+        level_instruction = LEVEL_INSTRUCTIONS.get(
+            selected_level,
+            LEVEL_INSTRUCTIONS["intermediate"],
+        )
+        source_material = await _map_reduce_transcript(
+            transcript,
+            _summarize_study_notes_chunk,
+        )
+        prompt = f"""
+    {master_prompt}
+
+    TASK: Produce accurate, detailed study notes based only on the provided
+    source material. This is a synthesis of what the video says, not an
+    invitation to supplement it with general knowledge.
+
+    SELECTED LEARNING LEVEL ({selected_level}):
+    {level_instruction}
+
+    SOURCE-FIDELITY RULES:
+    - Include only claims, examples, recommendations, and technical details supported by the source.
+    - Do not invent implementation advice, pros/cons, security guidance, use cases, trends, or conclusions.
+    - If you draw an implication explicitly requested by the user, label it as an inference and state its source basis.
+    - Preserve qualifications and uncertainty; do not strengthen claims.
+    - Never silently correct or replace a source term. Quote it and flag it as unclear if it appears erroneous.
+
+    FORMAT:
+    - Start with a concise title and overview.
+    - Organize topics in the order presented.
+    - Explain concepts, mechanisms, and examples that the source actually covers.
+    - Include a glossary only for terms used in the source.
+    - Omit sections the source does not support; do not pad with generic advice.
+    - Use clear Markdown headings and nested bullets where they improve readability.
+
+    SOURCE NOTES FROM THE COMPLETE VIDEO:
+    {source_material}
+    """
+        completion = await asyncio.to_thread(
+            groq_client.chat.completions.create,
             messages=[{"role": "user", "content": prompt}],
             model="openai/gpt-oss-120b",
         )
-        return completion.choices[0].message.content
+        content = completion.choices[0].message.content
+        if not content or not content.strip():
+            raise RuntimeError("The model returned empty study notes.")
+        return content.strip()
     except Exception as e:
-        return f"Error: {str(e)}"
+        raise RuntimeError(f"Study-notes generation failed: {e}") from e
 
-async def generate_visual_analysis(transcript: str, video_url: str, level: str = "intermediate", user_id: str = "default_user") -> str:
-    """Generates visual insights consistent with the Master Prompt."""
-    frames = await extract_frames(video_url)
-    if not frames: return "No visual frames could be extracted."
+async def generate_visual_analysis(
+    transcript: str,
+    video_url: str,
+    level: str = "intermediate",
+    user_id: str = "default_user",
+    dynamic_extra: str = "",
+    is_youtube: bool = True,
+    max_frames: int = 3,
+) -> str:
+    """Analyzes sampled video frames and answers any supplied visual focus."""
+    frames = await extract_frames(
+        video_url,
+        max_frames=max_frames,
+        is_youtube=is_youtube,
+    )
+    if not frames:
+        return (
+            "Visual analysis unavailable: no frames could be extracted. "
+            "Do not infer or guess what the video showed."
+        )
     
     from services.profile import get_master_prompt
     master_prompt = get_master_prompt(user_id)
 
+    level_instruction = LEVEL_INSTRUCTIONS.get(
+        level.lower(),
+        LEVEL_INSTRUCTIONS["intermediate"],
+    )
     vision_prompt = f"""
     {master_prompt}
-    
-    TASK: Analyze these {len(frames)} frames from the video.
-    Identify:
-    1. Key visual elements (diagrams, code, slides).
-    2. Contextual relevance to the transcript.
-    
+
+    TASK: Analyze these {len(frames)} representative frames sampled across the video.
+    Address the user's visual focus request and describe relevant visible content
+    such as diagrams, charts, code, slides, or images. Do not imply the frames are
+    from a particular timestamp. Describe only details that are actually legible.
+    If the requested item is not visible in the sampled frames, say so rather than
+    guessing.
+
+    USER'S VISUAL FOCUS REQUEST:
+    {dynamic_extra or "Describe the important visual content in these frames."}
+
+    TARGET LEVEL: {level_instruction}
+
     Write a professional markdown section titled 'Visual-Semantic Synthesis' in the tone of the Persona Blueprint.
     
     TRANSCRIPT PREVIEW: {transcript[:1000]}
     """
-    # ... rest of the vision logic using vision_prompt
 
-    # 1. Try Groq Vision (Llama 3.2)
-    if groq_client:
-        try:
-            content = [{"type": "text", "text": vision_prompt}]
-            for b64 in frames:
-                content.append({
-                    "type": "image_url",
-                    "image_url": {"url": f"data:image/jpeg;base64,{b64}"}
-                })
-            
-            completion = groq_client.chat.completions.create(
-                messages=[{"role": "user", "content": content}],
-                model="llama-3.2-11b-vision-preview",
-            )
-            return completion.choices[0].message.content
-        except Exception as e:
-            print(f"Groq Vision Error: {e}. Falling back to Gemini...")
-
-    # 2. Fallback to Gemini
+    # Prefer Gemini for diagram-focused visual analysis; retain Groq as fallback.
     if gemini_client:
         try:
             contents = [vision_prompt]
             for b64 in frames:
-                contents.append(types.Part.from_bytes(data=base64.b64decode(b64), mime_type="image/jpeg"))
-            
-            response = gemini_client.models.generate_content(model='gemini-2.0-flash', contents=contents)
-            return response.text
-        except Exception as e:
-            print(f"Gemini Vision Error: {e}. Moving to Final Logic Fallback...")
+                contents.append(
+                    types.Part.from_bytes(
+                        data=base64.b64decode(b64),
+                        mime_type="image/jpeg",
+                    )
+                )
 
-    # 3. Final Fallback: Text-Based Visual Deduction (The "Self-Healing" Layer)
+            response = await asyncio.to_thread(
+                gemini_client.models.generate_content,
+                model="gemini-3.5-flash-lite",
+                contents=contents,
+            )
+            if response.text and response.text.strip():
+                return response.text.strip()
+        except Exception as e:
+            print(f"Gemini Vision Error: {e}. Falling back to Groq...")
+
     if groq_client:
         try:
-            fallback_prompt = f"""
-            The visual analysis engine is currently under high load. 
-            Based on the following transcript, deduce what visual elements (slides, code, diagrams) 
-            were likely shown at these moments. 
-            
-            Format as a professional 'Visual Deduction' report.
-            
-            TRANSCRIPT:
-            {transcript[:4000]}
-            """
-            completion = groq_client.chat.completions.create(
-                messages=[{"role": "user", "content": fallback_prompt}],
-                model="openai/gpt-oss-120b",
-            )
-            return "Note: Visual synthesis generated from transcript analysis.\n\n" + completion.choices[0].message.content
-        except Exception:
-            pass
+            content = [{"type": "text", "text": vision_prompt}]
+            for b64 in frames:
+                content.append(
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/jpeg;base64,{b64}"},
+                    }
+                )
 
-    return "Visual analysis currently unavailable due to extreme API load. Please try again in 60 seconds."
+            completion = await asyncio.to_thread(
+                groq_client.chat.completions.create,
+                messages=[{"role": "user", "content": content}],
+                model="qwen/qwen3.8-27b",
+            )
+            explanation = completion.choices[0].message.content
+            if explanation and explanation.strip():
+                return explanation.strip()
+        except Exception as e:
+            print(f"Groq Vision Error: {e}.")
+
+    return (
+        "Visual analysis unavailable: all configured vision providers failed or "
+        "returned an empty response. No visual details were inferred."
+    )
 
 async def extract_knowledge_graph(transcript: str, user_id: str, video_id: str) -> Dict[str, Any]:
     """Generates a structured knowledge graph using JSON mode and Identity Blueprint."""

@@ -45,7 +45,7 @@ async def generate_quick_digest(transcript: str, level: str = "intermediate") ->
     
     try:
         response = client.models.generate_content(
-            model='gemini-2.0-flash',
+            model='gemini-3.8-flash',
             contents=prompt
         )
         
@@ -58,4 +58,3 @@ async def generate_quick_digest(transcript: str, level: str = "intermediate") ->
         return bullets[:5]
     except Exception as e:
         return [f"Failed to generate summary: {str(e)}"]
-

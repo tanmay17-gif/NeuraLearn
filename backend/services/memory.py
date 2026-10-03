@@ -1,9 +1,17 @@
-from typing import Dict, Any, List
+from typing import Any, Dict, List, Optional
 from services.supabase_client import supabase
 
-def save_to_memory(video_id: str, title: str, content: str, user_id: str = "default_user", profile_version_used: int = None):
+def save_to_memory(
+    video_id: str,
+    title: str,
+    content: str,
+    user_id: str = "default_user",
+    profile_version_used: Optional[int] = None,
+    jwt: Optional[str] = None,
+):
     """Saves video knowledge to Supabase — no embeddings needed."""
-    if not supabase: return
+    if not supabase:
+        return
     data = {
         "video_id": video_id,
         "title": title,
@@ -12,7 +20,10 @@ def save_to_memory(video_id: str, title: str, content: str, user_id: str = "defa
         "profile_version_used": profile_version_used
     }
     try:
-        supabase.table("knowledge").upsert(data, on_conflict="video_id").execute()
+        supabase.table("knowledge", jwt=jwt).upsert(
+            data,
+            on_conflict="video_id",
+        ).execute()
     except Exception as e:
         print(f"Memory save note (non-critical): {e}")
 
