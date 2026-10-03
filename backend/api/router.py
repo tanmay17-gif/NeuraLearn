@@ -10,7 +10,7 @@ import json
 from services.transcription import get_transcript
 from services import engine
 from services.memory import save_to_memory, search_memory
-from services.profile import update_preference, get_profile, update_persona_blueprint
+from services.profile import update_preference, get_profile, update_persona_blueprint, refine_persona_with_ai
 from services.supabase_client import verify_auth_token
 from services.cache import get_cached_synthesis, set_cached_synthesis, check_rate_limit
 from services import graph as graph_service
@@ -110,6 +110,7 @@ class FeedbackRequest(BaseModel):
     module: str
     rating: str
     level: str
+    custom_feedback: Optional[str] = ""
 
 class ProcessingResponse(BaseModel):
     video_id: str
@@ -399,6 +400,36 @@ async def save_feedback(
 ):
     update_preference(user_id, request.level, request.rating, jwt=jwt)
     return {"status": "success"}
+
+
+class RefinedPersonaRequest(BaseModel):
+    feedback_type: str  # too_long | too_technical | wrong_format | other
+    custom_feedback: Optional[str] = ""
+
+
+@api_router.post("/profile/refine-persona")
+async def refine_persona(
+    request: RefinedPersonaRequest,
+    user_id: str = Depends(get_current_user),
+    jwt: Optional[str] = Depends(get_current_jwt)
+):
+    """Uses AI to rewrite persona based on negative feedback while preserving key user details."""
+    if user_id == "default_user":
+        raise HTTPException(status_code=401, detail="Authentication required.")
+    try:
+        # AI rewrites the persona
+        new_blueprint = refine_persona_with_ai(
+            user_id=user_id,
+            feedback_type=request.feedback_type,
+            custom_feedback=request.custom_feedback or "",
+            jwt=jwt
+        )
+        # Save it
+        update_persona_blueprint(user_id, new_blueprint, jwt=jwt)
+        return {"status": "success", "refined_blueprint": new_blueprint}
+    except Exception as e:
+        print(f"[refine-persona] ERROR for user {user_id}: {type(e).__name__}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to refine persona: {str(e)}")
 
 
 @api_router.get("/profile/{target_user_id}")

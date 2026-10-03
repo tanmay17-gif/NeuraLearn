@@ -128,6 +128,7 @@ function App() {
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState(null);
   const [userId, setUserId] = useState('');
+  const [userEmail, setUserEmail] = useState('');
   const [isLoggedIn, setIsLoggedIn] = useState(false);
   const [userProfile, setUserProfile] = useState(null);
   const [showSettings, setShowSettings] = useState(false);
@@ -141,6 +142,7 @@ function App() {
   const [uploadFile, setUploadFile] = useState(null);
   const [showGlobalGraph, setShowGlobalGraph] = useState(false);
   const [mapMergeStats, setMapMergeStats] = useState(null);
+  const [personaUpdatedToast, setPersonaUpdatedToast] = useState(null); // { blueprint: string }
   
   // Video Player Ref & State for seeking and mini-player
   const playerRef = useRef(null);
@@ -152,6 +154,7 @@ function App() {
       if (session?.user) {
         const id = session.user.id;
         setUserId(id);
+        setUserEmail(session.user.email || '');
         setIsLoggedIn(true);
         fetchProfile(id);
       }
@@ -162,6 +165,7 @@ function App() {
       if (session?.user) {
         const id = session.user.id;
         setUserId(id);
+        setUserEmail(session.user.email || '');
         setIsLoggedIn(true);
         fetchProfile(id);
       } else {
@@ -245,6 +249,28 @@ function App() {
     } catch (err) { console.error("Feedback error", err); }
   };
 
+  const handleNegativeFeedback = async (moduleType, feedbackType, customFeedback = '') => {
+    // First save the standard preference signal
+    await handleFeedback(moduleType, feedbackType);
+    // Then call AI to refine persona (only for logged-in users with a persona set)
+    if (!isLoggedIn || !userId) return;
+    try {
+      const res = await axios.post(`${API_BASE}/profile/refine-persona`, {
+        feedback_type: feedbackType,
+        custom_feedback: customFeedback,
+      });
+      const refined = res.data.refined_blueprint;
+      setPersonaBlueprint(refined);
+      // Refresh full profile state
+      await fetchProfile(userId);
+      // Show toast
+      setPersonaUpdatedToast({ blueprint: refined, feedbackType });
+      setTimeout(() => setPersonaUpdatedToast(null), 8000);
+    } catch (err) {
+      console.error('Persona refine error', err);
+    }
+  };
+
   const handleProcess = async (e) => {
     e.preventDefault();
     if (sourceType === 'youtube' && !url) return;
@@ -316,7 +342,14 @@ function App() {
   const [copied, setCopied] = useState(null);
   const handleCopy = (text, type) => {
     let content = text;
-    if (type === 'digest' && Array.isArray(text)) content = text.join('\n');
+    if (type === 'digest') {
+      // Copy custom_insights if shown, otherwise join summary bullets
+      if (result?.custom_insights) {
+        content = result.custom_insights;
+      } else if (Array.isArray(text)) {
+        content = text.join('\n');
+      }
+    }
     navigator.clipboard.writeText(content);
     setCopied(type);
     setTimeout(() => setCopied(null), 2000);
@@ -343,40 +376,125 @@ function App() {
 
   const FeedbackControls = ({ moduleType }) => {
     const [showOptions, setShowOptions] = useState(false);
+    const [showCustom, setShowCustom] = useState(false);
+    const [customText, setCustomText] = useState('');
+    const [refining, setRefining] = useState(false);
+
+    const negativeOptions = [
+      { key: 'too_long', label: '📏 Too long' },
+      { key: 'too_technical', label: '🔬 Too technical' },
+      { key: 'wrong_format', label: '📄 Wrong format' },
+      { key: 'other', label: '✏️ Other (tell us)' },
+    ];
+
+    const isNegative = negativeOptions.some(o => feedback[moduleType] === o.key) || feedback[moduleType] === 'down';
+
+    const handleNeg = async (key) => {
+      if (key === 'other') {
+        setShowOptions(false);
+        setShowCustom(true);
+        return;
+      }
+      setShowOptions(false);
+      setRefining(true);
+      await handleNegativeFeedback(moduleType, key);
+      setRefining(false);
+    };
+
+    const handleCustomSubmit = async () => {
+      if (!customText.trim()) return;
+      setShowCustom(false);
+      setRefining(true);
+      await handleNegativeFeedback(moduleType, 'other', customText.trim());
+      setRefining(false);
+      setCustomText('');
+    };
+
     return (
-    <div style={{ display: 'flex', gap: '0.75rem', marginTop: '2.5rem', alignItems: 'center', paddingTop: '1.5rem', borderTop: '1px solid #F1F5F9' }}>
-      <span style={{ fontSize: '0.8rem', color: 'var(--text-dim)', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Insight helpful?</span>
-      <div style={{ display: 'flex', gap: '0.5rem', position: 'relative' }}>
-        <button 
-          onClick={() => { handleFeedback(moduleType, 'up'); setShowOptions(false); }}
-          style={{ 
-            padding: '0.6rem 1rem', borderRadius: '0.75rem', border: '1px solid #E2E8F0', background: feedback[moduleType] === 'up' ? 'var(--primary)' : 'white', 
-            color: feedback[moduleType] === 'up' ? 'white' : 'var(--text-dim)', cursor: 'pointer', transition: 'all 0.2s ease', display: 'flex', alignItems: 'center', gap: '0.4rem', fontWeight: 600
-          }}
-        >
-          <span>👍</span> {feedback[moduleType] === 'up' ? 'Helpful' : ''}
-        </button>
-        <div style={{ position: 'relative' }}>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem', marginTop: '2.5rem', paddingTop: '1.5rem', borderTop: '1px solid #F1F5F9' }}>
+      <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center', flexWrap: 'wrap' }}>
+        <span style={{ fontSize: '0.8rem', color: 'var(--text-dim)', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Insight helpful?</span>
+        <div style={{ display: 'flex', gap: '0.5rem', position: 'relative', flexWrap: 'wrap', alignItems: 'center' }}>
           <button 
-            onClick={() => setShowOptions(!showOptions)}
+            onClick={() => { handleFeedback(moduleType, 'up'); setShowOptions(false); setShowCustom(false); }}
             style={{ 
-              padding: '0.6rem 1rem', borderRadius: '0.75rem', border: '1px solid #E2E8F0', background: ['down', 'too_long', 'too_technical', 'wrong_format'].includes(feedback[moduleType]) ? 'var(--accent)' : 'white', 
-              color: ['down', 'too_long', 'too_technical', 'wrong_format'].includes(feedback[moduleType]) ? 'white' : 'var(--text-dim)', cursor: 'pointer', transition: 'all 0.2s ease', display: 'flex', alignItems: 'center', gap: '0.4rem', fontWeight: 600
+              padding: '0.6rem 1rem', borderRadius: '0.75rem', border: '1px solid #E2E8F0', background: feedback[moduleType] === 'up' ? 'var(--primary)' : 'white', 
+              color: feedback[moduleType] === 'up' ? 'white' : 'var(--text-dim)', cursor: 'pointer', transition: 'all 0.2s ease', display: 'flex', alignItems: 'center', gap: '0.4rem', fontWeight: 600
             }}
           >
-            <span>👎</span> {['down', 'too_long', 'too_technical', 'wrong_format'].includes(feedback[moduleType]) ? 'Not for me' : ''}
+            <span>👍</span> {feedback[moduleType] === 'up' ? 'Helpful' : ''}
           </button>
-          {showOptions && (
-            <div style={{ position: 'absolute', top: '100%', left: 0, marginTop: '0.5rem', background: 'white', border: '1px solid #E2E8F0', borderRadius: '0.75rem', padding: '0.5rem', boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.1)', zIndex: 10, display: 'flex', flexDirection: 'column', gap: '0.25rem', minWidth: '150px' }}>
-              <button onClick={() => { handleFeedback(moduleType, 'too_long'); setShowOptions(false); }} style={{ padding: '0.5rem', textAlign: 'left', background: 'none', border: 'none', cursor: 'pointer', borderRadius: '0.5rem', fontSize: '0.85rem' }}>Too long</button>
-              <button onClick={() => { handleFeedback(moduleType, 'too_technical'); setShowOptions(false); }} style={{ padding: '0.5rem', textAlign: 'left', background: 'none', border: 'none', cursor: 'pointer', borderRadius: '0.5rem', fontSize: '0.85rem' }}>Too technical</button>
-              <button onClick={() => { handleFeedback(moduleType, 'wrong_format'); setShowOptions(false); }} style={{ padding: '0.5rem', textAlign: 'left', background: 'none', border: 'none', cursor: 'pointer', borderRadius: '0.5rem', fontSize: '0.85rem' }}>Wrong format</button>
-            </div>
-          )}
+          <div style={{ position: 'relative' }}>
+            <button 
+              onClick={() => { setShowOptions(!showOptions); setShowCustom(false); }}
+              disabled={refining}
+              style={{ 
+                padding: '0.6rem 1rem', borderRadius: '0.75rem', border: '1px solid #E2E8F0',
+                background: isNegative ? 'var(--accent)' : refining ? '#F1F5F9' : 'white', 
+                color: isNegative ? 'white' : refining ? 'var(--text-dim)' : 'var(--text-dim)',
+                cursor: refining ? 'default' : 'pointer', transition: 'all 0.2s ease', display: 'flex', alignItems: 'center', gap: '0.4rem', fontWeight: 600
+              }}
+            >
+              {refining ? (
+                <><RefreshCw size={14} className="animate-spin" /> Refining persona...</>
+              ) : (
+                <><span>👎</span> {isNegative ? 'Not for me' : ''}</>
+              )}
+            </button>
+            {showOptions && (
+              <div style={{ position: 'absolute', top: '100%', left: 0, marginTop: '0.5rem', background: 'white', border: '1px solid #E2E8F0', borderRadius: '0.75rem', padding: '0.5rem', boxShadow: '0 8px 24px -4px rgba(0,0,0,0.12)', zIndex: 10, display: 'flex', flexDirection: 'column', gap: '0.25rem', minWidth: '180px' }}>
+                {negativeOptions.map(opt => (
+                  <button
+                    key={opt.key}
+                    onClick={() => handleNeg(opt.key)}
+                    style={{ padding: '0.6rem 0.75rem', textAlign: 'left', background: 'none', border: 'none', cursor: 'pointer', borderRadius: '0.5rem', fontSize: '0.85rem', fontWeight: 600, color: 'var(--text-main)', transition: 'background 0.15s' }}
+                    onMouseEnter={e => e.target.style.background = '#F8FAFC'}
+                    onMouseLeave={e => e.target.style.background = 'none'}
+                  >
+                    {opt.label}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
         </div>
       </div>
+
+      {/* Custom feedback text area */}
+      <AnimatePresence>
+        {showCustom && (
+          <motion.div
+            initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }}
+            style={{ overflow: 'hidden' }}
+          >
+            <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'flex-end', padding: '1rem', background: '#F8FAFC', borderRadius: '0.75rem', border: '1px solid #E2E8F0' }}>
+              <div style={{ flex: 1 }}>
+                <p style={{ fontSize: '0.8rem', fontWeight: 700, color: 'var(--primary)', marginBottom: '0.5rem', textTransform: 'uppercase', letterSpacing: '0.04em' }}>✏️ What would you like changed?</p>
+                <textarea
+                  value={customText}
+                  onChange={e => setCustomText(e.target.value)}
+                  placeholder="E.g., Use more real-world examples. Avoid abstract theory..."
+                  style={{ width: '100%', minHeight: '80px', padding: '0.75rem', border: '1px solid #E2E8F0', borderRadius: '0.5rem', fontSize: '0.9rem', resize: 'vertical', fontFamily: 'inherit', outline: 'none', boxSizing: 'border-box' }}
+                  autoFocus
+                />
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+                <button
+                  onClick={handleCustomSubmit}
+                  disabled={!customText.trim()}
+                  style={{ padding: '0.6rem 1.25rem', background: 'var(--primary)', color: 'white', border: 'none', borderRadius: '0.5rem', fontWeight: 700, cursor: customText.trim() ? 'pointer' : 'default', opacity: customText.trim() ? 1 : 0.5, fontSize: '0.85rem', whiteSpace: 'nowrap' }}
+                >
+                  Apply ✓
+                </button>
+                <button onClick={() => { setShowCustom(false); setCustomText(''); }} style={{ padding: '0.6rem', background: 'none', color: 'var(--text-dim)', border: '1px solid #E2E8F0', borderRadius: '0.5rem', cursor: 'pointer', fontSize: '0.8rem' }}>Cancel</button>
+              </div>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   )};
+
 
   return (
     <div style={{ minHeight: '100vh', position: 'relative' }}>
@@ -403,16 +521,30 @@ function App() {
       <div className="main-container" style={{ maxWidth: '1100px' }}>
         {/* Settings Modal */}
         <AnimatePresence>
-          {showSettings && (
+        {showSettings && (
             <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', backdropFilter: 'blur(16px)', zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '2rem' }}>
               <motion.div 
                 initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.95 }}
-                className="glass-card" style={{ maxWidth: '600px', width: '100%', padding: '3rem' }}
+                className="glass-card" style={{ maxWidth: '600px', width: '100%', padding: '3rem', maxHeight: '90vh', overflowY: 'auto' }}
               >
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '2rem' }}>
                   <h2 style={{ margin: 0, fontWeight: 900, fontSize: '1.8rem' }}>Persona Configuration</h2>
                   <button onClick={() => setShowSettings(false)} style={{ background: 'var(--primary-light)', border: 'none', width: '32px', height: '32px', borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', color: 'var(--primary)' }}>&times;</button>
                 </div>
+
+                {/* Show persona update badge if recently refined */}
+                {personaUpdatedToast && (
+                  <motion.div
+                    initial={{ opacity: 0, y: -10 }} animate={{ opacity: 1, y: 0 }}
+                    style={{ marginBottom: '1.5rem', padding: '1rem 1.25rem', background: 'linear-gradient(135deg, rgba(79,70,229,0.08) 0%, rgba(6,182,212,0.08) 100%)', border: '1px solid rgba(79,70,229,0.2)', borderRadius: '1rem', display: 'flex', alignItems: 'center', gap: '0.75rem' }}
+                  >
+                    <span style={{ fontSize: '1.4rem' }}>✨</span>
+                    <div>
+                      <p style={{ margin: 0, fontWeight: 700, fontSize: '0.9rem', color: 'var(--primary)' }}>Persona refined from your feedback</p>
+                      <p style={{ margin: 0, fontSize: '0.8rem', color: 'var(--text-dim)', marginTop: '0.2rem' }}>All your key details are preserved. Review the changes below.</p>
+                    </div>
+                  </motion.div>
+                )}
                 
                 <div style={{ marginBottom: '2.5rem' }}>
                   <span className="label-premium">Identity Blueprint</span>
@@ -450,9 +582,12 @@ function App() {
               >
                 <Network size={18} /> My Knowledge Graph
               </button>
-              <button onClick={() => setShowSettings(true)} className="btn-primary" style={{ padding: '0.75rem 1.25rem', borderRadius: '14px', gap: '0.75rem' }}>
+              <button onClick={() => setShowSettings(true)} className="btn-primary" style={{ padding: '0.75rem 1.25rem', borderRadius: '14px', gap: '0.75rem', position: 'relative' }}>
                 <GraduationCap size={20} />
                 <span style={{ fontWeight: 800 }}>Persona Settings</span>
+                {personaUpdatedToast && (
+                  <span style={{ position: 'absolute', top: '-6px', right: '-6px', width: '14px', height: '14px', background: '#22c55e', borderRadius: '50%', border: '2px solid white', display: 'block' }} />
+                )}
               </button>
               <button onClick={handleLogout} style={{ background: 'transparent', border: 'none', color: 'var(--text-dim)', fontWeight: 700, cursor: 'pointer', fontSize: '0.9rem' }}>Exit</button>
             </div>
@@ -596,18 +731,40 @@ function App() {
               {/* Persona Insights Area */}
               <AnimatePresence>
                 {userProfile && userProfile.instructions?.length > 0 && (
-                  <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0 }} style={{ marginBottom: '3rem' }}>
-                    <div className="glass-card" style={{ borderLeft: '4px solid var(--primary)', padding: '1.5rem' }}>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
-                        <h3 style={{ fontSize: '1rem', display: 'flex', alignItems: 'center', gap: '0.5rem', margin: 0 }}>
-                          <BrainCircuit size={18} color="var(--primary)" /> 
-                          Learned Behaviors for <span style={{ color: 'var(--primary)' }}>{userId}</span>
-                        </h3>
+                  <motion.div initial={{ opacity: 0, y: -10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -10 }} style={{ marginBottom: '3rem' }}>
+                    <div style={{
+                      background: 'linear-gradient(135deg, rgba(79,70,229,0.04) 0%, rgba(6,182,212,0.04) 100%)',
+                      border: '1px solid rgba(79,70,229,0.12)',
+                      borderRadius: '1.5rem',
+                      padding: '1.5rem 2rem',
+                    }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', marginBottom: '1.25rem' }}>
+                        <div style={{ width: '34px', height: '34px', background: 'var(--primary)', borderRadius: '10px', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, boxShadow: '0 4px 12px rgba(79,70,229,0.25)' }}>
+                          <BrainCircuit size={18} color="white" />
+                        </div>
+                        <div>
+                          <p style={{ margin: 0, fontWeight: 800, fontSize: '0.9rem', color: 'var(--text-main)' }}>Your Adaptive Learning Profile</p>
+                          <p style={{ margin: 0, fontSize: '0.75rem', color: 'var(--text-dim)', marginTop: '0.1rem' }}>
+                            Signed in as <span style={{ color: 'var(--primary)', fontWeight: 700 }}>{userEmail || 'you'}</span>
+                          </p>
+                        </div>
                       </div>
                       <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem' }}>
                         {userProfile.instructions.map((ins, i) => (
-                          <div key={i} style={{ padding: '0.4rem 0.8rem', background: 'white', borderRadius: '0.75rem', fontSize: '0.8rem', border: '1px solid #E2E8F0', color: 'var(--text-dim)' }}>
-                            ✨ {ins}
+                          <div key={i} style={{
+                            padding: '0.45rem 0.9rem',
+                            background: 'white',
+                            borderRadius: '2rem',
+                            fontSize: '0.8rem',
+                            border: '1px solid rgba(79,70,229,0.15)',
+                            color: 'var(--text-main)',
+                            fontWeight: 600,
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: '0.4rem',
+                            boxShadow: '0 1px 4px rgba(0,0,0,0.05)'
+                          }}>
+                            <span style={{ fontSize: '0.85rem' }}>✨</span> {ins}
                           </div>
                         ))}
                       </div>
@@ -828,6 +985,59 @@ function App() {
                   height="100%"
                   style={{ position: 'absolute', top: 0, left: 0 }}
                 />
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        {/* Persona Updated Toast Notification */}
+        <AnimatePresence>
+          {personaUpdatedToast && (
+            <motion.div
+              initial={{ opacity: 0, y: 80, scale: 0.9 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: 80, scale: 0.9 }}
+              transition={{ type: 'spring', stiffness: 300, damping: 25 }}
+              style={{
+                position: 'fixed',
+                bottom: '2rem',
+                left: '50%',
+                transform: 'translateX(-50%)',
+                zIndex: 9998,
+                background: 'linear-gradient(135deg, #1e1b4b 0%, #0f172a 100%)',
+                border: '1px solid rgba(99, 102, 241, 0.4)',
+                borderRadius: '1rem',
+                padding: '1rem 1.5rem',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '1rem',
+                boxShadow: '0 25px 50px -12px rgba(0,0,0,0.5), 0 0 0 1px rgba(99,102,241,0.1)',
+                maxWidth: '420px',
+                width: 'calc(100vw - 4rem)',
+              }}
+            >
+              <div style={{ width: '40px', height: '40px', background: 'linear-gradient(135deg, #4f46e5 0%, #06b6d4 100%)', borderRadius: '10px', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                <Sparkles size={20} color="white" />
+              </div>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <p style={{ margin: 0, fontWeight: 800, fontSize: '0.9rem', color: 'white' }}>✨ Persona Updated!</p>
+                <p style={{ margin: '0.2rem 0 0', fontSize: '0.78rem', color: '#94a3b8', lineHeight: 1.4 }}>
+                  AI refined your persona based on feedback. Key details preserved.
+                </p>
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem', flexShrink: 0 }}>
+                <button
+                  onClick={() => { setShowSettings(true); }}
+                  style={{ padding: '0.5rem 0.9rem', background: 'var(--primary)', color: 'white', border: 'none', borderRadius: '0.5rem', fontWeight: 700, cursor: 'pointer', fontSize: '0.78rem', whiteSpace: 'nowrap' }}
+                >
+                  View Persona
+                </button>
+                <button
+                  onClick={() => setPersonaUpdatedToast(null)}
+                  style={{ padding: '0.4rem', background: 'transparent', color: '#64748b', border: 'none', cursor: 'pointer', fontSize: '0.75rem', textAlign: 'center' }}
+                >
+                  Dismiss
+                </button>
               </div>
             </motion.div>
           )}

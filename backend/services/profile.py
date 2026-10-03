@@ -1,5 +1,6 @@
 import os
 import datetime
+import json
 from typing import Dict, Any, List, Optional
 from services.supabase_client import supabase
 
@@ -62,6 +63,75 @@ def update_persona_blueprint(user_id: str, blueprint: str, jwt: Optional[str] = 
     profile["feedback_count"] = profile.get("feedback_count", 0) + 1
     save_profile(user_id, profile, trigger_event="Updated persona blueprint", jwt=jwt)
     print(f"[profile] Blueprint updated successfully for user {user_id}")
+
+
+def refine_persona_with_ai(user_id: str, feedback_type: str, custom_feedback: str = "", jwt: Optional[str] = None) -> str:
+    """
+    Uses the Groq LLM to intelligently rewrite the persona blueprint based on
+    negative feedback while STRICTLY preserving all key user details.
+    Returns the new blueprint text.
+    """
+    profile = get_profile(user_id, jwt=jwt)
+    current_blueprint = profile.get("persona_blueprint", "").strip()
+
+    if not current_blueprint:
+        current_blueprint = "The user is a high-level intellectual seeking deep synthesis."
+
+    # Map feedback type to a clear instruction
+    feedback_instructions = {
+        "too_long": "The user felt the output was TOO LONG. Rewrite the persona to explicitly request shorter, more concise, and to-the-point responses. Add a clear instruction like 'Keep responses brief and dense.'",
+        "too_technical": "The user felt the output was TOO TECHNICAL. Rewrite the persona to request simpler language, fewer jargon terms, and clearer analogies. Add an instruction to explain concepts in accessible terms.",
+        "wrong_format": "The user felt the output had the WRONG FORMAT. Rewrite the persona to be more flexible about formatting, requesting a clean structure (e.g., prefer paragraph flow over heavy bullet points, or vice versa). Add a clear formatting preference.",
+        "other": f"The user has provided this custom feedback: '{custom_feedback}'. Incorporate this feedback by adjusting the persona accordingly."
+    }
+
+    instruction = feedback_instructions.get(feedback_type, feedback_instructions["other"])
+    if feedback_type == "other" and not custom_feedback:
+        instruction = "The user gave negative feedback. Make the persona slightly more accessible and clear."
+
+    refine_prompt = f"""You are an expert at writing AI persona blueprints for learning assistants.
+
+The user's CURRENT persona blueprint is:
+---
+{current_blueprint}
+---
+
+FEEDBACK TO ADDRESS:
+{instruction}
+
+YOUR TASK:
+Rewrite the persona blueprint to address the feedback while STRICTLY PRESERVING all key details the user defined: their background, academic level, subject area, goals, and any specific instructions they gave.
+
+DO NOT remove, dilute, or generalize any key identifying information.
+DO NOT add new assumptions about the user that weren't in the original.
+ONLY make targeted changes that address the feedback.
+Keep the rewritten persona at a similar length or shorter.
+Write ONLY the new persona text — no explanations, no labels, no preamble."""
+
+    try:
+        from groq import Groq
+        groq_key = os.getenv("GROQ_API_KEY", "")
+        if not groq_key or "your_groq" in groq_key:
+            raise Exception("Groq not configured")
+        client = Groq(api_key=groq_key)
+        completion = client.chat.completions.create(
+            messages=[{"role": "user", "content": refine_prompt}],
+            model="openai/gpt-oss-120b",
+            max_tokens=800,
+        )
+        refined = completion.choices[0].message.content.strip()
+        print(f"[profile] AI refined persona for user {user_id} (feedback: {feedback_type})")
+        return refined
+    except Exception as e:
+        print(f"[profile] AI refinement failed: {e}, using heuristic fallback")
+        # Heuristic fallback
+        additions = {
+            "too_long": "\n\nIMPORTANT: Keep all responses concise and brief. Avoid lengthy elaborations.",
+            "too_technical": "\n\nIMPORTANT: Use simple, accessible language. Avoid heavy jargon. Explain terms clearly.",
+            "wrong_format": "\n\nIMPORTANT: Prefer clean paragraph prose over dense bullet lists. Use clear structure.",
+        }
+        addition = additions.get(feedback_type, f"\n\nNote: {custom_feedback}" if custom_feedback else "")
+        return current_blueprint + addition
 
 def update_preference(user_id: str, level: str, rating: str, jwt: Optional[str] = None):
     """Evolve Persona: Derives behaviors from ratings."""
