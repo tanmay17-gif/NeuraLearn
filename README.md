@@ -36,7 +36,7 @@ Everything is personalized. You can set an "Identity Blueprint" — tell it you'
 
 ## Research Evaluation Module
 
-This repository includes a dedicated blind A/B testing module designed for academic evaluation (Objective 2). 
+This repository includes a dedicated blind A/B testing module designed for academic evaluation (Objective 2).
 
 - **Data Logging (`generation_log`):** Every API request records the exact dynamically generated prompt and output summary, proving the system's personalization.
 - **Profile History (`profile_history`):** The system records immutable snapshots of the user's profile every time they give feedback and the system learns a new instruction.
@@ -47,21 +47,22 @@ This repository includes a dedicated blind A/B testing module designed for acade
 
 ## Tech Stack
 
-| Layer | Tech |
-|---|---|
-| Frontend | React + Vite, Framer Motion, Lucide Icons, Vanilla CSS |
-| Backend | FastAPI (Python) |
-| Primary LLM | Groq — `llama-3.3-70b-versatile` + `whisper-large-v3-turbo` |
-| Vision LLM | Groq — `llama-3.2-11b-vision-preview` |
-| Multimodal Fallback | Google Gemini 2.0 Flash |
-| Auth + Database | Supabase (Magic Link + Postgres) |
-| Cache + Rate Limit | Upstash Redis |
+| Layer               | Tech                                                        |
+| ------------------- | ----------------------------------------------------------- |
+| Frontend            | React + Vite, Framer Motion, Lucide Icons, Vanilla CSS      |
+| Backend             | FastAPI (Python)                                            |
+| Primary LLM         | Groq — `llama-3.3-70b-versatile` + `whisper-large-v3-turbo` |
+| Vision LLM          | Groq — `llama-3.2-11b-vision-preview`                       |
+| Multimodal Fallback | Google Gemini 2.0 Flash                                     |
+| Auth + Database     | Supabase (Magic Link + Postgres)                            |
+| Cache + Rate Limit  | Upstash Redis                                               |
 
 ---
 
 ## Setup
 
 ### Prerequisites
+
 - Python 3.10+
 - Node.js 18+
 - [ffmpeg](https://ffmpeg.org/download.html) — required for local video uploads (add to PATH)
@@ -71,7 +72,8 @@ This repository includes a dedicated blind A/B testing module designed for acade
 ```bash
 cd backend
 python -m venv .venv
-.\.venv\Scripts\activate
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+.\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 uvicorn main:app --reload --port 8001
 ```
@@ -91,8 +93,8 @@ UPSTASH_REDIS_TOKEN=your_upstash_token
 
 ```bash
 cd frontend
-npm install
-npm run dev
+npm.cmd install
+npm.cmd run dev
 ```
 
 Open `http://localhost:5173`.
@@ -101,9 +103,9 @@ Open `http://localhost:5173`.
 
 ## API Keys (all free tier)
 
-| Service | Where to get it |
-|---|---|
-| Groq | [console.groq.com](https://console.groq.com) |
+| Service       | Where to get it                                    |
+| ------------- | -------------------------------------------------- |
+| Groq          | [console.groq.com](https://console.groq.com)       |
 | Google Gemini | [aistudio.google.com](https://aistudio.google.com) |
-| Supabase | [supabase.com](https://supabase.com) |
-| Upstash Redis | [upstash.com](https://upstash.com) |
+| Supabase      | [supabase.com](https://supabase.com)               |
+| Upstash Redis | [upstash.com](https://upstash.com)                 |

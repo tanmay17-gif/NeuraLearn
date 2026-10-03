@@ -433,10 +433,14 @@ async def refine_persona(
 
 
 @api_router.get("/profile/{target_user_id}")
-async def get_user_profile(target_user_id: str, current_user_id: str = Depends(get_current_user)):
+async def get_user_profile(
+    target_user_id: str,
+    current_user_id: str = Depends(get_current_user),
+    jwt: Optional[str] = Depends(get_current_jwt),
+):
     if target_user_id != current_user_id and current_user_id != "default_user":
         raise HTTPException(status_code=403, detail="Not authorized to view this profile.")
-    return get_profile(target_user_id)
+    return get_profile(target_user_id, jwt=jwt)
 
 
 @api_router.post("/profile/custom")
